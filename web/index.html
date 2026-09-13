@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>牛逼笔记本</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- ===== 顶部栏 ===== -->
+  <header id="topbar">
+    <div class="brand">🔥 <b>牛逼笔记本</b><span class="ver">v1.0</span></div>
+    <div class="search-box">
+      <input id="searchInput" type="text" placeholder="搜索笔记标题 / 内容…" autocomplete="off">
+    </div>
+    <div class="top-actions">
+      <button id="btnExtract" class="btn" title="从卷子照片提取图片">📷 提图</button>
+      <button id="btnImport" class="btn" title="导入已有知识结构">📚 导入结构</button>
+      <button id="btnAI" class="btn" title="对勾选笔记重新 AI 分类">✨ AI整理</button>
+      <button id="btnPrint" class="btn primary" title="打印勾选的笔记">🖨 打印 <span id="printCount" class="badge">0</span></button>
+    </div>
+    <div id="ollamaStatus" class="status-pill">连接 OLLAMA…</div>
+    <div class="author-pill" title="作者 / 工作室">✍ 类人群星闪耀时 @豆包 · 北中小作坊</div>
+  </header>
+
+  <div id="main">
+    <!-- ===== 左栏：分类树 ===== -->
+    <aside id="sidebar">
+      <div class="side-title">📂 知识结构
+        <button id="btnNewCategory" class="mini-btn" title="新建顶层分类">＋</button>
+      </div>
+      <div id="treeRoot" class="tree"></div>
+    </aside>
+
+    <!-- ===== 中栏：笔记列表（双栏分裂） ===== -->
+    <section id="notesPane">
+      <div class="pane-head">
+        <span id="currentScopeLabel">全部笔记</span>
+        <span id="noteCount" class="count"></span>
+        <div class="pane-actions">
+          <label class="chk-all"><input type="checkbox" id="checkAll"> 全选</label>
+          <button id="btnNewNote" class="btn small primary">＋ 新笔记</button>
+        </div>
+      </div>
+      <div id="noteGrid" class="note-grid"></div>
+      <div id="emptyState" class="empty">还没有笔记，点「＋ 新笔记」开始吧</div>
+    </section>
+
+    <!-- ===== 右栏：编辑器 ===== -->
+    <section id="editorPane" class="hidden">
+      <div class="editor-head">
+        <input id="noteTitle" type="text" placeholder="笔记标题，如：植物的维管束" maxlength="100">
+        <div class="editor-row">
+          <label>范围 <select id="noteScope"></select></label>
+          <label>分类 <input id="noteCategory" type="text" placeholder="AI 自动归类后显示" readonly></label>
+        </div>
+      </div>
+      <div class="editor-tools">
+        <button class="tool" data-cmd="h2">H2</button>
+        <button class="tool" data-cmd="h3">H3</button>
+        <button class="tool" data-cmd="bold">粗</button>
+        <button class="tool" data-cmd="italic">斜</button>
+        <button class="tool" data-cmd="ul">•列表</button>
+        <button class="tool" data-cmd="ol">1.列表</button>
+        <button class="tool" data-cmd="table">表格</button>
+        <button class="tool" data-cmd="code">代码</button>
+        <button class="tool" data-cmd="hr">─</button>
+        <span class="tool-sep"></span>
+        <label class="tool upload" title="上传图片插入">🖼 图片<input type="file" id="imgUpload" accept="image/*" hidden></label>
+        <label class="tool upload" title="上传视频（打印时会被去除）">🎬 视频<input type="file" id="videoUpload" accept="video/*" hidden></label>
+        <label class="tool upload" title="上传音频（打印时会被去除）">🎵 音频<input type="file" id="audioUpload" accept="audio/*" hidden></label>
+        <label class="tool" title="从已提取的图库插入">
+          图库
+          <select id="mediaGallery" class="gallery-select"><option value="">—</option></select>
+        </label>
+        <span class="tool-sep"></span>
+        <button id="btnPreview" class="tool toggle active">编辑</button>
+        <button id="btnSource" class="tool toggle">源码</button>
+        <span class="tool-spacer"></span>
+        <button id="btnSave" class="btn primary">💾 保存</button>
+        <button id="btnDelete" class="btn danger" title="删除当前笔记">🗑</button>
+      </div>
+      <div class="editor-body">
+        <div id="previewBox" class="preview" contenteditable="true" spellcheck="false"></div>
+        <textarea id="srcBox" class="src hidden" spellcheck="false" placeholder="&lt;h2&gt;标题&lt;/h2&gt;&#10;&lt;p&gt;正文…&lt;/p&gt;"></textarea>
+      </div>
+      <div id="aiResult" class="ai-result hidden"></div>
+    </section>
+  </div>
+</div>
+
+<!-- ===== 打印确认弹窗 ===== -->
+<div id="modalMask" class="mask hidden">
+  <div class="modal">
+    <h3 id="modalTitle">提示</h3>
+    <div id="modalBody" class="modal-body"></div>
+    <div class="modal-actions">
+      <button id="modalCancel" class="btn">取消</button>
+      <button id="modalOk" class="btn primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== 卷子提图面板 ===== -->
+<div id="extractPanel" class="mask hidden">
+  <div class="panel">
+    <div class="panel-head">📷 卷子图片提取
+      <button id="extractClose" class="mini-btn">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="extract-upload">
+        <label class="drop-zone" id="dropZone">
+          点击上传卷子照片（或拖进来）<br><small>白纸上的图会自动检测描边提取</small>
+          <input type="file" id="extractFile" accept="image/*" hidden>
+        </label>
+        <div class="extract-mode"><label><input type="radio" name="emode" value="auto" checked> 自动检测</label>
+        <label><input type="radio" name="emode" value="crop"> 手动框选</label></div>
+      </div>
+      <div id="extractCanvasBox" class="canvas-box hidden">
+        <canvas id="extractCanvas"></canvas>
+        <div class="canvas-hint">拖动鼠标框选要提取的区域，然后点「提取选区」</div>
+      </div>
+      <div id="extractResults" class="extract-results"></div>
+      <div class="extract-hint hidden" id="extractTargetNote">将插入到当前笔记：<b id="extractNoteName"></b></div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
