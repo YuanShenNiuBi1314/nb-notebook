@@ -53,6 +53,13 @@ body {
   background: linear-gradient(90deg, rgba(255,159,67,.25), rgba(255,107,107,.25));
   color: #ffd9a8; border: 1px solid rgba(255,159,67,.35);
 }
+/* 底部版权条 */
+.copyright {
+  flex-shrink: 0; height: 28px; line-height: 28px; text-align: center;
+  font-size: 11px; color: #8a94a3; background: #eef1f5;
+  border-top: 1px solid var(--line); letter-spacing: .3px;
+  user-select: none;
+}
 
 /* ===== 按钮 ===== */
 .btn {
@@ -268,6 +275,18 @@ body {
 ::-webkit-scrollbar-thumb { background: #c9d2dd; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #aab6c4; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ===== 版权信息 ===== */
+.app-footer {
+  flex-shrink: 0;
+  text-align: center;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--sub);
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  letter-spacing: .3px;
+}
 
 /* ===== 移动端适配 ===== */
 @media (max-width: 1000px) {
