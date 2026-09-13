@@ -249,6 +249,10 @@ async function saveNote(autoClassify = false) {
   } else {
     meta = await api("/api/notes/" + state.editing, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, scope, content }) });
   }
+  if (meta.aiTitle) {
+    $("#noteTitle").value = meta.title;
+    showAiResult("🤖 AI 已自动起标题：" + meta.title, false);
+  }
   if (autoClassify) {
     const res = await postJson("/api/notes/classify-again", { id: state.editing, scope });
     if (res.ok && res.path && res.path.length) {
@@ -433,7 +437,9 @@ function renderExtractResults() {
 function openImportZipModal() {
   openModal("📦 导入手机采集包",
     `<p style="margin-bottom:10px">选择手机「离线采集」导出的 zip 压缩包（微信传到电脑后保存到本地再选）：</p>
-     <label style="font-size:12px;color:var(--sub)">归入范围：
+     <label style="font-size:12px;color:var(--sub)">笔记标题：
+       <input type="text" id="importZipTitle" placeholder="留空：AI 自动起标题" style="margin-top:4px"></label>
+     <label style="font-size:12px;color:var(--sub);margin-top:8px">归入范围：
        <select id="importZipScope">${scopeOptionsHtml()}</select></label>
      <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px">
        <input type="checkbox" id="importZipAI" checked> 保存后 AI 自动整理分类</label>
@@ -442,11 +448,12 @@ function openImportZipModal() {
       const file = $("#importZipFile").files[0];
       if (!file) { alert("请先选择 zip 压缩包"); return; }
       const scope = $("#importZipScope").value;
+      const title = $("#importZipTitle").value.trim();
       const auto = $("#importZipAI").checked ? 1 : 0;
       const fd = new FormData();
       fd.append("file", file);
       fd.append("scope", scope);
-      fd.append("title", file.name.replace(/\.zip$/i, ""));
+      fd.append("title", title);
       fd.append("autoClassify", auto);
       const btn = $("#modalOk");
       btn.disabled = true; btn.textContent = "导入中…";
@@ -455,6 +462,7 @@ function openImportZipModal() {
         closeModal();
         await loadTree(); await loadNotes();
         alert(`导入成功 ✓ 「${r.title}」\n${r.images} 张图片 · ${r.items} 个条目` +
+              (r.aiTitle ? "\n🤖 AI 已自动起标题" : "") +
               (r.aiReason ? "\nAI 归类理由：" + r.aiReason : ""));
       } catch (e) {
         btn.disabled = false; btn.textContent = "开始导入";

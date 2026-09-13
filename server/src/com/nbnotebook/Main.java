@@ -136,12 +136,21 @@ public final class Main {
             }
             if (seg.length == 1 && method.equals("POST")) {
                 Map<String, Object> body = readJson(ex);
-                String title = Json.str(body, "title", "");
+                String title = Json.str(body, "title", "").trim();
                 String scope = Json.str(body, "scope", "默认");
                 String content = Json.str(body, "content", "");
                 String categoryId = Json.str(body, "categoryId", "");
                 boolean auto = Json.num(body, "autoClassify", 0) == 1;
                 List<String> category = Json.strList(body, "category");
+                // AI 自动补全标题：用户未明确指定标题且有正文时
+                boolean aiTitle = false;
+                if (isPlaceholderTitle(title) && !content.isBlank()) {
+                    Map<String, Object> tRes = classifier.suggestTitle(scope, content);
+                    if (Boolean.TRUE.equals(tRes.get("ok"))) {
+                        title = Json.str(tRes, "title", "无标题笔记");
+                        aiTitle = true;
+                    }
+                }
                 Map<String, Object> meta;
                 if (auto) {
                     Map<String, Object> tree = store.loadTree();
@@ -163,6 +172,10 @@ public final class Main {
                         meta.put("categoryId", leaf.get("id"));
                         store.writeMeta(meta);
                     }
+                }
+                if (aiTitle) {
+                    meta.put("aiTitle", true);
+                    store.writeMeta(meta);
                 }
                 json(ex, 200, meta);
                 return;
@@ -220,8 +233,24 @@ public final class Main {
                 String content = body.containsKey("content") ? Json.str(body, "content") : null;
                 String categoryId = body.containsKey("categoryId") ? Json.str(body, "categoryId") : null;
                 List<String> category = body.containsKey("category") ? Json.strList(body, "category") : null;
+                boolean aiTitle = false;
+                if (title != null && isPlaceholderTitle(title)
+                        && content != null && !content.isBlank()) {
+                    String sc = scope != null && !scope.isBlank() ? scope
+                            : Json.str(store.getMeta(id), "scope", "默认");
+                    Map<String, Object> tRes = classifier.suggestTitle(sc, content);
+                    if (Boolean.TRUE.equals(tRes.get("ok"))) {
+                        title = Json.str(tRes, "title", "无标题笔记");
+                        aiTitle = true;
+                    }
+                }
                 store.update(id, title, scope, content, categoryId, category);
-                json(ex, 200, store.getMeta(id));
+                Map<String, Object> meta = store.getMeta(id);
+                if (aiTitle) {
+                    meta.put("aiTitle", true);
+                    store.writeMeta(meta);
+                }
+                json(ex, 200, meta);
                 return;
             }
             if (seg.length >= 3 && seg[1].equals("adopt") && seg[2].equals("extract") && method.equals("POST")) {
@@ -382,12 +411,22 @@ public final class Main {
         return i >= 0 ? s.substring(i + 1) : s;
     }
 
+    /** 占位标题判断：用户未明确指定标题 */
+    static boolean isPlaceholderTitle(String t) {
+        if (t == null || t.isBlank()) return true;
+        String s = t.trim();
+        return s.equals("无标题笔记") || s.equals("新笔记") || s.equals("草稿笔记")
+                || s.equals("未命名笔记") || s.equals("未命名") || s.equals("新建笔记");
+    }
+
     /**
      * 导入手机离线采集包（zip）。
      * 包结构：manifest.json {app, version, items:[{type:photo|text|draw, file, text}]} + 图片文件
      * 无 manifest 时按扩展名自动归类。可触发 AI 分类。
      */
     static Map<String, Object> importZip(byte[] zipBytes, String scope, String title, String filename, boolean autoClassify) throws IOException {
+        // 标题：显式给了就用；否则先用文件名占位，内容生成后 AI 补全
+        boolean titleFromFile = title == null || title.isBlank() || title.equals(filename);
         if (title == null || title.isBlank()) {
             title = filename;
             if (title.toLowerCase().endsWith(".zip")) title = title.substring(0, title.length() - 4);
@@ -466,6 +505,17 @@ public final class Main {
         }
         store.update(id, null, scope, html.toString(), null, null);
 
+        // 4b. 标题 AI 补全（占位标题且正文非空）
+        String aiTitle = "";
+        if (titleFromFile && html.length() > 0) {
+            Map<String, Object> tRes = classifier.suggestTitle(scope, html.toString());
+            if (Boolean.TRUE.equals(tRes.get("ok"))) {
+                aiTitle = Json.str(tRes, "title", "");
+                title = aiTitle;
+                store.update(id, title, scope, null, null, null);
+            }
+        }
+
         // 4. 可选 AI 分类
         String reason = "";
         if (autoClassify) {
@@ -485,6 +535,7 @@ public final class Main {
         out.put("items", items.size());
         out.put("images", imgCount);
         out.put("aiReason", reason);
+        if (!aiTitle.isEmpty()) out.put("aiTitle", true);
         out.put("ok", true);
         return out;
     }

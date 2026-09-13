@@ -54,7 +54,7 @@ public final class Classifier {
     }
 
     /**
-     * 分类一篇笔记。
+     * 分类一篇笔记。只读标题 + 梗概（正文开头一小段），不读全文，避免上下文不够。
      * @param scope 用户选择的标题域，如"生物竞赛"
      * @param title 笔记标题
      * @param contentHtml 笔记正文 HTML
@@ -62,8 +62,7 @@ public final class Classifier {
      * @return {"path": [...], "reason": "...", "ok": bool, "error": "..."}
      */
     public Map<String, Object> classify(String scope, String title, String contentHtml, List<String> flatTree) {
-        String text = htmlToText(contentHtml);
-        if (text.length() > 1200) text = text.substring(0, 1200) + "…";
+        String text = summaryOf(contentHtml, 400);
 
         StringBuilder prompt = new StringBuilder();
         prompt.append("你是一个严谨的学科笔记分类器。用户正在积累【").append(scope).append("】的知识笔记。\n\n");
@@ -80,7 +79,7 @@ public final class Classifier {
         prompt.append("4. 领域归属必须正确：例如「动物」相关内容绝不能归到「植物」类下；主题明显超出已有顶层类别领域时，必须新建顶层类别（第一级）。\n");
         prompt.append("5. 如果笔记内容非常概括（涉及多个子主题），归入其上级类别即可。\n\n");
         prompt.append("笔记标题：").append(title == null ? "" : title).append("\n");
-        prompt.append("笔记内容：\n").append(text.isEmpty() ? "（无正文）" : text).append("\n\n");
+        prompt.append("笔记梗概（正文开头，仅作参考）：\n").append(text.isEmpty() ? "（无正文）" : text).append("\n\n");
         prompt.append("只输出 JSON，格式：{\"path\": [\"一级类别\", \"二级类别\"], \"reason\": \"一句话理由\"}\n");
         prompt.append("path 数组长度 1 或 2。用中文。");
 
@@ -101,16 +100,75 @@ public final class Classifier {
         return result;
     }
 
+    /** 提取正文梗概：转纯文本、压缩空白、截断到 maxLen 字符 */
+    static String summaryOf(String contentHtml, int maxLen) {
+        String text = htmlToText(contentHtml);
+        text = text.replaceAll("\\s+", " ").trim();
+        if (text.length() > maxLen) text = text.substring(0, maxLen) + "…";
+        return text;
+    }
+
+    /**
+     * 自动补全标题：AI 扫描正文，生成简洁标题（≤ 20 字）。
+     * @return {"title": "...", "ok": bool, "error": "..."}
+     */
+    public Map<String, Object> suggestTitle(String scope, String contentHtml) {
+        String text = summaryOf(contentHtml, 600);
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是一个笔记助手。下面是一篇【").append(scope == null || scope.isBlank() ? "通用" : scope)
+                .append("】领域的笔记正文（可能是刷卷子/学习时记录的知识点）。\n");
+        prompt.append("请给它起一个简洁准确的标题，突出核心主题，例如「植物的维管束」「动物消化系统」「光合作用过程」。\n");
+        prompt.append("标题不超过 20 个字，不要带引号、不要带句号。\n\n");
+        prompt.append("正文：\n").append(text.isEmpty() ? "（无正文）" : text).append("\n\n");
+        prompt.append("只输出 JSON：{\"title\": \"标题\"}");
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        try {
+            String raw = generate(prompt.toString());
+            String s = raw.trim();
+            int start = s.indexOf('{');
+            int end = s.lastIndexOf('}');
+            if (start >= 0 && end > start) s = s.substring(start, end + 1);
+            String title = "";
+            try {
+                Map<String, Object> m = Json.asMap(Json.parse(s));
+                title = Json.str(m, "title", "");
+            } catch (Exception e) {
+                Matcher ma = Pattern.compile("\"title\"\\s*:\\s*\"([^\"]*)\"").matcher(s);
+                if (ma.find()) title = ma.group(1);
+            }
+            title = title.trim().replaceAll("^[\"“”']+|[\"“”']+$", "");
+            if (title.isBlank()) throw new IOException("AI 未返回标题");
+            if (title.length() > 30) title = title.substring(0, 30);
+            result.put("title", title);
+            result.put("ok", true);
+        } catch (Exception e) {
+            result.put("title", "");
+            result.put("ok", false);
+            result.put("error", "AI 起标题失败: " + e.getMessage());
+        }
+        return result;
+    }
+
     /** 调用 OLLAMA /api/generate，强制 JSON 输出 */
     private String generate(String prompt) throws Exception {
+        return generate(prompt, "json", 300);
+    }
+
+    /** 调用 OLLAMA /api/generate，纯文本输出（无 format 约束） */
+    private String generatePlain(String prompt, int maxTokens) throws Exception {
+        return generate(prompt, null, maxTokens);
+    }
+
+    private String generate(String prompt, String format, int maxTokens) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
         body.put("prompt", prompt);
         body.put("stream", false);
-        body.put("format", "json");
+        if (format != null) body.put("format", format);
         Map<String, Object> options = new LinkedHashMap<>();
         options.put("temperature", 0.1);
-        options.put("num_predict", 300);
+        options.put("num_predict", maxTokens);
         body.put("options", options);
 
         HttpRequest req = HttpRequest.newBuilder()
