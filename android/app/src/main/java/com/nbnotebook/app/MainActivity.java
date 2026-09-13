@@ -1,9 +1,12 @@
 package com.nbnotebook.app;
 
 import android.annotation.SuppressLint;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.View;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -14,6 +17,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -22,8 +26,9 @@ import androidx.appcompat.app.AppCompatActivity;
 
 /**
  * 牛逼笔记本 · Android 客户端
- * 首次使用：输入电脑的局域网 IP 和端口（电脑端启动服务器时会显示，如 http://192.168.0.2:8080）
- * 之后自动连接，可随时点右上角"切换"换服务器。
+ * 首页双入口：
+ *   1. 🌐 连接电脑 —— 局域网直连电脑服务器（需同一 Wi-Fi）
+ *   2. 📴 离线采集 —— 不依赖网络：拍照 / 写字 / 描边 → 压缩包 → 微信发电脑整理
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -35,7 +40,7 @@ public class MainActivity extends AppCompatActivity {
     private FrameLayout setupLayout;
     private EditText ipInput;
     private EditText portInput;
-    private TextView hintText;
+    private FrameLayout homeLayout;
 
     private String serverUrl = "";
 
@@ -44,25 +49,66 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // ============ 设置界面 ============
+        // ============ 首页（双入口） ============
+        homeLayout = new FrameLayout(this);
+        LinearLayout homeBox = new LinearLayout(this);
+        homeBox.setOrientation(LinearLayout.VERTICAL);
+        homeBox.setGravity(Gravity.CENTER_HORIZONTAL);
+        homeBox.setPadding(44, 60, 44, 30);
+
+        TextView logo = new TextView(this);
+        logo.setText("🔥");
+        logo.setTextSize(52);
+        logo.setGravity(Gravity.CENTER);
+        homeBox.addView(logo);
+
+        TextView appName = new TextView(this);
+        appName.setText("牛逼笔记本");
+        appName.setTextSize(26);
+        appName.setGravity(Gravity.CENTER);
+        appName.setTextColor(Color.rgb(31, 45, 61));
+        appName.setPadding(0, 8, 0, 0);
+        homeBox.addView(appName);
+
+        TextView sub = new TextView(this);
+        sub.setText("刷卷子 · 记知识点 · AI 整理");
+        sub.setTextSize(13);
+        sub.setTextColor(Color.rgb(107, 119, 133));
+        sub.setGravity(Gravity.CENTER);
+        sub.setPadding(0, 6, 0, 40);
+        homeBox.addView(sub);
+
+        Button btnOnline = bigHomeBtn("🌐 连接电脑", "同一 Wi-Fi 下直连电脑服务器，AI 整理/打印");
+        homeBox.addView(btnOnline);
+        Button btnOffline = bigHomeBtn("📴 离线采集", "不联网也能用：拍照 / 写字 / 描边 → 打包发电脑");
+        homeBox.addView(btnOffline);
+
+        TextView footer = new TextView(this);
+        footer.setText("© 2026 类人群星闪耀时 @豆包 · 北中小作坊");
+        footer.setTextSize(11);
+        footer.setTextColor(Color.rgb(160, 160, 160));
+        footer.setGravity(Gravity.CENTER);
+        footer.setPadding(0, 40, 0, 0);
+        homeBox.addView(footer);
+
+        homeLayout.addView(homeBox);
+
+        btnOnline.setOnClickListener(v -> enterOnline());
+        btnOffline.setOnClickListener(v ->
+                startActivity(new Intent(this, OfflineCaptureActivity.class)));
+
+        // ============ 设置界面（连接电脑） ============
         setupLayout = new FrameLayout(this);
-        android.widget.LinearLayout setupBox = new android.widget.LinearLayout(this);
-        setupBox.setOrientation(android.widget.LinearLayout.VERTICAL);
-        setupBox.setGravity(android.view.Gravity.CENTER);
+        LinearLayout setupBox = new LinearLayout(this);
+        setupBox.setOrientation(LinearLayout.VERTICAL);
+        setupBox.setGravity(Gravity.CENTER);
         setupBox.setPadding(60, 0, 60, 0);
 
         TextView title = new TextView(this);
-        title.setText("🔥 牛逼笔记本");
-        title.setTextSize(24);
-        title.setGravity(android.view.Gravity.CENTER);
-        title.setPadding(0, 0, 0, 10);
-
-        TextView sub = new TextView(this);
-        sub.setText("连接你的电脑，随时随地记笔记");
-        sub.setTextSize(14);
-        sub.setTextColor(0xFF666666);
-        sub.setGravity(android.view.Gravity.CENTER);
-        sub.setPadding(0, 0, 0, 40);
+        title.setText("🌐 连接电脑");
+        title.setTextSize(22);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, 0, 0, 24);
 
         ipInput = new EditText(this);
         ipInput.setHint("电脑局域网 IP（如 192.168.0.2）");
@@ -76,10 +122,8 @@ public class MainActivity extends AppCompatActivity {
         portInput.setTextSize(16);
         portInput.setSingleLine(true);
         portInput.setPadding(20, 12, 20, 12);
-        android.widget.LinearLayout.LayoutParams portLp =
-                new android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams portLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         portLp.topMargin = 12;
         portInput.setLayoutParams(portLp);
 
@@ -87,28 +131,24 @@ public class MainActivity extends AppCompatActivity {
         connectBtn.setText("连 接");
         connectBtn.setTextSize(16);
         connectBtn.setAllCaps(false);
-        android.widget.LinearLayout.LayoutParams btnLp =
-                new android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         btnLp.topMargin = 24;
         connectBtn.setLayoutParams(btnLp);
 
-        hintText = new TextView(this);
+        TextView hintText = new TextView(this);
         hintText.setText("提示：手机和电脑需连同一个 Wi-Fi。\n电脑端启动服务器后会显示访问地址，例如 http://192.168.0.2:8080");
         hintText.setTextSize(12);
-        hintText.setTextColor(0xFF888888);
+        hintText.setTextColor(Color.rgb(136, 136, 136));
         hintText.setPadding(0, 30, 0, 0);
 
         setupBox.addView(title);
-        setupBox.addView(sub);
         setupBox.addView(ipInput);
         setupBox.addView(portInput);
         setupBox.addView(connectBtn);
         setupBox.addView(hintText);
         setupLayout.addView(setupBox);
-
-        connectBtn.setOnClickListener(v -> tryConnect(false));
+        connectBtn.setOnClickListener(v -> tryConnect());
 
         // ============ WebView ============
         webView = new WebView(this);
@@ -145,15 +185,50 @@ public class MainActivity extends AppCompatActivity {
         progressBar.setVisibility(View.GONE);
 
         FrameLayout root = new FrameLayout(this);
+        root.addView(homeLayout, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(webView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         FrameLayout.LayoutParams pbLp = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, 12);
-        pbLp.gravity = android.view.Gravity.TOP;
+        pbLp.gravity = Gravity.TOP;
         root.addView(progressBar, pbLp);
         setContentView(root);
 
-        // ============ 恢复或首次设置 ============
+        webView.setVisibility(View.GONE);
+    }
+
+    private Button bigHomeBtn(String main, String desc) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(24, 20, 24, 20);
+        TextView t1 = new TextView(this);
+        t1.setText(main);
+        t1.setTextSize(18);
+        t1.setTextColor(Color.WHITE);
+        t1.setGravity(Gravity.CENTER);
+        TextView t2 = new TextView(this);
+        t2.setText(desc);
+        t2.setTextSize(11);
+        t2.setTextColor(Color.argb(200, 255, 255, 255));
+        t2.setGravity(Gravity.CENTER);
+        t2.setPadding(0, 4, 0, 0);
+        box.addView(t1);
+        box.addView(t2);
+        Button b = new Button(this);
+        b.setAllCaps(false);
+        b.setBackgroundColor(Color.rgb(47, 109, 246));
+        b.setElevation(4);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 210);
+        lp.bottomMargin = 18;
+        b.setLayoutParams(lp);
+        b.setText("\n" + main + "\n" + desc + "\n");
+        return b;
+    }
+
+    private void enterOnline() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         serverUrl = prefs.getString(KEY_URL, "");
         if (!serverUrl.isEmpty()) {
@@ -164,22 +239,22 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showSetup(String error) {
-        setupLayout.bringToFront();
-        setupLayout.setVisibility(View.VISIBLE);
+        homeLayout.setVisibility(View.GONE);
         webView.setVisibility(View.GONE);
+        setupLayout.setVisibility(View.VISIBLE);
         if (error != null && !error.isEmpty()) {
             Toast.makeText(this, error, Toast.LENGTH_LONG).show();
         }
-        // 自动填充电脑 IP：从 Wi-Fi 信息拿不到主机 IP，提示用户查看电脑端显示的地址
     }
 
     private void showWeb(String url) {
-        webView.setVisibility(View.VISIBLE);
+        homeLayout.setVisibility(View.GONE);
         setupLayout.setVisibility(View.GONE);
+        webView.setVisibility(View.VISIBLE);
         webView.loadUrl(url);
     }
 
-    private void tryConnect(boolean force) {
+    private void tryConnect() {
         String ip = ipInput.getText().toString().trim();
         String port = portInput.getText().toString().trim();
         if (ip.isEmpty()) { Toast.makeText(this, "请填写电脑的局域网 IP", Toast.LENGTH_SHORT).show(); return; }
@@ -194,6 +269,11 @@ public class MainActivity extends AppCompatActivity {
     public void onBackPressed() {
         if (webView.getVisibility() == View.VISIBLE && webView.canGoBack()) {
             webView.goBack();
+        } else if (webView.getVisibility() == View.VISIBLE || setupLayout.getVisibility() == View.VISIBLE) {
+            // 返回首页
+            webView.setVisibility(View.GONE);
+            setupLayout.setVisibility(View.GONE);
+            homeLayout.setVisibility(View.VISIBLE);
         } else {
             super.onBackPressed();
         }

@@ -429,6 +429,40 @@ function renderExtractResults() {
   });
 }
 
+// ---------- 导入手机离线采集包 ----------
+function openImportZipModal() {
+  openModal("📦 导入手机采集包",
+    `<p style="margin-bottom:10px">选择手机「离线采集」导出的 zip 压缩包（微信传到电脑后保存到本地再选）：</p>
+     <label style="font-size:12px;color:var(--sub)">归入范围：
+       <select id="importZipScope">${scopeOptionsHtml()}</select></label>
+     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px">
+       <input type="checkbox" id="importZipAI" checked> 保存后 AI 自动整理分类</label>
+     <input type="file" id="importZipFile" accept=".zip,application/zip" style="margin-top:12px;width:100%">`,
+    async () => {
+      const file = $("#importZipFile").files[0];
+      if (!file) { alert("请先选择 zip 压缩包"); return; }
+      const scope = $("#importZipScope").value;
+      const auto = $("#importZipAI").checked ? 1 : 0;
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("scope", scope);
+      fd.append("title", file.name.replace(/\.zip$/i, ""));
+      fd.append("autoClassify", auto);
+      const btn = $("#modalOk");
+      btn.disabled = true; btn.textContent = "导入中…";
+      try {
+        const r = await api("/api/import-zip", { method: "POST", body: fd });
+        closeModal();
+        await loadTree(); await loadNotes();
+        alert(`导入成功 ✓ 「${r.title}」\n${r.images} 张图片 · ${r.items} 个条目` +
+              (r.aiReason ? "\nAI 归类理由：" + r.aiReason : ""));
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "开始导入";
+        alert("导入失败：" + e.message);
+      }
+    }, "开始导入");
+}
+
 // ---------- 导入知识结构 ----------
 function openImportModal() {
   openModal("导入已有知识结构",
@@ -550,6 +584,7 @@ function bindEvents() {
   $("#btnPrint").addEventListener("click", doPrint);
   $("#btnAI").addEventListener("click", aiOrganize);
   $("#btnImport").addEventListener("click", openImportModal);
+  $("#btnImportZip").addEventListener("click", openImportZipModal);
   $("#btnNewCategory").addEventListener("click", async () => {
     const name = prompt("新建顶层分类（范围）名称：");
     if (!name || !name.trim()) return;

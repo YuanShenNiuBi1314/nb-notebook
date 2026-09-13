@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.zip.*;
 
 /**
  * 牛逼笔记本 · 本地服务器
@@ -283,6 +284,19 @@ public final class Main {
             return;
         }
 
+        // ---- 导入手机离线采集包（zip） ----
+        if (seg[0].equals("import-zip") && method.equals("POST")) {
+            Map<String, Object> parts = parseMultipart(ex);
+            byte[] file = (byte[]) parts.get("file");
+            if (file == null) throw new IOException("未收到压缩包");
+            String scope = parts.get("scope") == null ? "默认" : parts.get("scope").toString();
+            String title = parts.get("title") == null ? "" : parts.get("title").toString();
+            String filename = parts.get("filename") == null ? "" : parts.get("filename").toString();
+            boolean auto = "1".equals(parts.getOrDefault("autoClassify", "0").toString());
+            json(ex, 200, importZip(file, scope, title, filename, auto));
+            return;
+        }
+
         json(ex, 404, Map.of("ok", false, "error", "接口不存在: " + path));
     }
 
@@ -360,6 +374,119 @@ public final class Main {
         String name = UUID.randomUUID().toString().substring(0, 12) + ".png";
         Files.write(dir.resolve(name), png);
         return "/extract/" + name;
+    }
+
+    static String basename(String p) {
+        String s = p.replace("\\", "/");
+        int i = s.lastIndexOf('/');
+        return i >= 0 ? s.substring(i + 1) : s;
+    }
+
+    /**
+     * 导入手机离线采集包（zip）。
+     * 包结构：manifest.json {app, version, items:[{type:photo|text|draw, file, text}]} + 图片文件
+     * 无 manifest 时按扩展名自动归类。可触发 AI 分类。
+     */
+    static Map<String, Object> importZip(byte[] zipBytes, String scope, String title, String filename, boolean autoClassify) throws IOException {
+        if (title == null || title.isBlank()) {
+            title = filename;
+            if (title.toLowerCase().endsWith(".zip")) title = title.substring(0, title.length() - 4);
+            if (title.isBlank()) title = "手机采集笔记 " + Store.now();
+        }
+        // 1. 解压
+        Map<String, byte[]> files = new LinkedHashMap<>();
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipBytes))) {
+            ZipEntry e;
+            while ((e = zis.getNextEntry()) != null) {
+                if (e.isDirectory()) continue;
+                files.put(e.getName(), zis.readAllBytes());
+            }
+        }
+        if (files.isEmpty()) throw new IOException("压缩包为空");
+
+        // 2. 解析条目
+        List<Map<String, Object>> items = new ArrayList<>();
+        byte[] manifestBytes = files.get("manifest.json");
+        if (manifestBytes != null) {
+            try {
+                Map<String, Object> manifest = Json.asMap(Json.parse(new String(manifestBytes, StandardCharsets.UTF_8)));
+                for (Object o : Json.arr(manifest, "items")) {
+                    if (o instanceof Map<?, ?> m) items.add(Json.asMap(m));
+                }
+            } catch (Exception ignored) { items = new ArrayList<>(); }
+        }
+        if (items.isEmpty()) {
+            for (Map.Entry<String, byte[]> f : files.entrySet()) {
+                String name = f.getKey();
+                if (name.equals("manifest.json")) continue;
+                String low = name.toLowerCase();
+                Map<String, Object> it = new LinkedHashMap<>();
+                if (low.endsWith(".jpg") || low.endsWith(".jpeg") || low.endsWith(".png") || low.endsWith(".webp")) {
+                    it.put("type", "photo"); it.put("file", name);
+                } else if (low.endsWith(".txt")) {
+                    it.put("type", "text"); it.put("text", new String(f.getValue(), StandardCharsets.UTF_8));
+                } else continue;
+                items.add(it);
+            }
+        }
+
+        // 3. 创建笔记
+        Map<String, Object> meta = store.create(title, scope, "", null, null);
+        String id = (String) meta.get("id");
+        StringBuilder html = new StringBuilder();
+        int imgCount = 0;
+        for (Map<String, Object> it : items) {
+            String type = Json.str(it, "type", "text");
+            if (type.equals("text")) {
+                String t = Json.str(it, "text", "");
+                if (t != null && !t.isBlank()) {
+                    html.append("<p>").append(t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")).append("</p>\n");
+                }
+            } else {
+                String file = Json.str(it, "file", "");
+                if (file == null || file.isBlank()) continue;
+                // 容错取文件：直接匹配 → 反斜杠替换 → 按 basename 匹配（兼容不同 zip 打包工具）
+                byte[] imgBytes = files.get(file);
+                if (imgBytes == null) imgBytes = files.get(file.replace("\\", "/"));
+                if (imgBytes == null) {
+                    String base = basename(file);
+                    for (Map.Entry<String, byte[]> f : files.entrySet()) {
+                        if (basename(f.getKey()).equals(base)) { imgBytes = f.getValue(); break; }
+                    }
+                }
+                if (imgBytes == null) continue;
+                String base = basename(file);
+                String ext = base.contains(".") ? base.substring(base.lastIndexOf('.') + 1).toLowerCase() : "png";
+                if (ext.equals("jpeg")) ext = "jpg";
+                if (!ext.matches("[a-z0-9]{2,5}")) ext = "png";
+                String url = store.saveMedia(id, imgBytes, ext);
+                html.append("<p><img src=\"").append(url).append("\" alt=\"采集图片\"></p>\n");
+                imgCount++;
+            }
+        }
+        store.update(id, null, scope, html.toString(), null, null);
+
+        // 4. 可选 AI 分类
+        String reason = "";
+        if (autoClassify) {
+            Map<String, Object> tree = store.loadTree();
+            Map<String, Object> scopeNode = store.findChild(tree, scope);
+            List<String> flat = scopeNode == null ? new ArrayList<>() : store.flattenTree(scopeNode, "");
+            Map<String, Object> res = classifier.classify(scope, title, html.toString(), flat);
+            Map<String, Object> norm = classifier.normalizePath(store, scope, Json.strList(res, "path"));
+            store.update(id, null, null, null, Json.str(norm, "categoryId", ""), Json.strList(norm, "path"));
+            reason = Json.str(res, "reason", "");
+        } else {
+            Map<String, Object> leaf = store.ensureCategoryInTree(scope, new ArrayList<>(), null);
+            store.update(id, null, null, null, Json.str(leaf, "id", ""), new ArrayList<>());
+        }
+        meta = store.getMeta(id);
+        Map<String, Object> out = new LinkedHashMap<>(meta);
+        out.put("items", items.size());
+        out.put("images", imgCount);
+        out.put("aiReason", reason);
+        out.put("ok", true);
+        return out;
     }
 
     static int[] sizeOf(byte[] img) {
