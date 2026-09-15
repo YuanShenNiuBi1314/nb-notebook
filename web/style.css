@@ -81,6 +81,17 @@ body {
   font-size: 15px; cursor: pointer; padding: 2px 6px; border-radius: 6px;
 }
 .mini-btn:hover { background: var(--accent-bg); color: var(--accent); }
+.pending-card {
+  display: flex; align-items: center; gap: 10px; background: #fff;
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+}
+.pending-card .mini {
+  font-size: 12px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: #fff; cursor: pointer; color: var(--accent);
+}
+.pending-card .mini:hover { background: var(--accent-bg); }
+.pending-card .mini.danger { color: #e04a4a; border-color: #f0c9c9; }
+.pending-card .mini.danger:hover { background: #fdecec; }
 
 /* ===== 主区域三栏 ===== */
 #main { flex: 1; display: flex; min-height: 0; }

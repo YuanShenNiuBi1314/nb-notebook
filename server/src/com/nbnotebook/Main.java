@@ -23,6 +23,7 @@ public final class Main {
     static Path WEB_DIR;
     static Store store;
     static Classifier classifier;
+    static PendingStore pending;
 
     public static void main(String[] args) throws Exception {
         Path base = Path.of(System.getProperty("nb.base", System.getProperty("user.dir")));
@@ -33,6 +34,7 @@ public final class Main {
         }
         store = new Store(DATA_DIR);
         store.init();
+        pending = new PendingStore(DATA_DIR);
 
         // OLLAMA 探测
         classifier = new Classifier("http://127.0.0.1:11434", "qwen3:8b");
@@ -72,6 +74,7 @@ public final class Main {
             if (path.equals("/style.css")) { serveFile(ex, "style.css"); return; }
             if (path.startsWith("/media/")) { serveMedia(ex, path); return; }
             if (path.startsWith("/extract/")) { serveExtract(ex, path); return; }
+            if (path.startsWith("/pending-media/")) { servePendingMedia(ex, path); return; }
             if (path.startsWith("/api/")) { api(ex, path, method); return; }
             ex.sendResponseHeaders(404, -1);
             ex.close();
@@ -97,6 +100,164 @@ public final class Main {
             out.put("lanIps", lanIps());
             out.put("port", ex.getLocalAddress().getPort());
             json(ex, 200, out);
+            return;
+        }
+
+        // ---- 手机实时采集：进待整理区（缓冲区） ----
+        if (seg[0].equals("capture") && method.equals("POST")) {
+            Map<String, Object> parts = parseMultipart(ex);
+            String scope = "默认";
+            String title = "";
+            List<Map<String, Object>> items = new ArrayList<>();
+            Object metaObj = parts.get("meta");
+            if (metaObj instanceof byte[] bb) metaObj = new String(bb, StandardCharsets.UTF_8);
+            if (metaObj != null) {
+                Map<String, Object> meta = Json.asMap(Json.parse(metaObj.toString()));
+                scope = Json.str(meta, "scope", scope);
+                title = Json.str(meta, "title", "");
+                for (Object o : Json.arr(meta, "items")) {
+                    if (o instanceof Map<?, ?> m) items.add(Json.asMap(m));
+                }
+            }
+            // 图片：文件名 → bytes（同一 part 内的 name 与 filename 严格对应）
+            Map<String, byte[]> media = new LinkedHashMap<>();
+            List<Object> images = partsOf(parts, "images");
+            List<Object> fnames = partsOf(parts, "images.filename");
+            for (int i = 0; i < images.size(); i++) {
+                if (images.get(i) instanceof byte[] b) {
+                    String fn = i < fnames.size() && fnames.get(i) != null
+                            ? fnames.get(i).toString() : "img" + (i + 1) + ".png";
+                    if (fn == null || fn.isBlank()) fn = "img" + (i + 1) + ".png";
+                    media.put(sanitizeFileName(fn), b);
+                }
+            }
+            // 拼 HTML（图片用 /pm/ 占位，create 后替换为 /pending-media/<id>/）
+            StringBuilder html = new StringBuilder();
+            int imgCount = 0;
+            for (Map<String, Object> it : items) {
+                String type = Json.str(it, "type", "text");
+                if (type.equals("text")) {
+                    String t = Json.str(it, "text", "");
+                    if (t != null && !t.isBlank()) {
+                        html.append("<p>").append(t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")).append("</p>\n");
+                    }
+                } else {
+                    String f = Json.str(it, "file", "");
+                    if (f == null || f.isBlank()) continue;
+                    byte[] b = media.get(f);
+                    if (b == null) {
+                        String base = basename(f);
+                        for (Map.Entry<String, byte[]> e : media.entrySet()) {
+                            if (basename(e.getKey()).equals(base)) { b = e.getValue(); break; }
+                        }
+                    }
+                    if (b == null) continue;
+                    imgCount++;
+                    html.append("<p><img src=\"/pm/").append(f).append("\" alt=\"采集图片\"></p>\n");
+                }
+            }
+            Map<String, Object> meta = pending.create(scope, title, html.toString(), media);
+            // 替换占位 → 真实待整理媒体路径
+            String id = (String) meta.get("id");
+            Path cf = pending.dir().resolve(id).resolve("content.html");
+            String content = Files.readString(cf, StandardCharsets.UTF_8)
+                    .replace("/pm/", "/pending-media/" + id + "/");
+            Files.write(cf, content.getBytes(StandardCharsets.UTF_8));
+            Map<String, Object> out = new LinkedHashMap<>(meta);
+            out.put("items", items.size());
+            out.put("ok", true);
+            json(ex, 200, out);
+            return;
+        }
+
+        // ---- 待整理区管理 ----
+        if (seg[0].equals("pending")) {
+            if (seg.length == 1 && method.equals("GET")) {
+                json(ex, 200, Map.of("ok", true, "pending", pending.list()));
+                return;
+            }
+            if (seg.length >= 2) {
+                String id = seg[1];
+                Map<String, Object> pmeta = pending.get(id);
+                if (pmeta == null) throw new IOException("待整理条目不存在");
+                if (seg.length == 2 && method.equals("GET")) {
+                    Map<String, Object> out = new LinkedHashMap<>(pmeta);
+                    out.put("content", pending.readContent(id));
+                    json(ex, 200, out);
+                    return;
+                }
+                if (seg.length == 2 && method.equals("DELETE")) {
+                    pending.delete(id);
+                    json(ex, 200, Map.of("ok", true));
+                    return;
+                }
+                if (seg.length == 3 && seg[2].equals("accept") && method.equals("POST")) {
+                    Map<String, Object> body = readJson(ex);
+                    String scope = Json.str(body, "scope", Json.str(pmeta, "scope", "默认"));
+                    String title = Json.str(body, "title", "");
+                    String categoryId = Json.str(body, "categoryId", "");
+                    List<String> category = Json.strList(body, "category");
+                    boolean auto = Json.num(body, "autoClassify", 0) == 1;
+                    String content = pending.readContent(id);
+                    // 标题 AI 补全
+                    boolean aiTitle = false;
+                    if (isPlaceholderTitle(title) && !content.isBlank()) {
+                        Map<String, Object> tRes = classifier.suggestTitle(scope, content);
+                        if (Boolean.TRUE.equals(tRes.get("ok"))) {
+                            title = Json.str(tRes, "title", "无标题笔记");
+                            aiTitle = true;
+                        }
+                    }
+                    // 创建正式笔记
+                    Map<String, Object> meta = store.create(title, scope, "", category, categoryId);
+                    String noteId = (String) meta.get("id");
+                    // 复制媒体并替换 img src
+                    Map<String, byte[]> media = pending.readMedia(id);
+                    for (Map.Entry<String, byte[]> e : media.entrySet()) {
+                        String f = e.getKey();
+                        String ext = f.contains(".") ? f.substring(f.lastIndexOf('.') + 1).toLowerCase() : "png";
+                        if (ext.equals("jpeg")) ext = "jpg";
+                        if (!ext.matches("[a-z0-9]{2,5}")) ext = "png";
+                        String url = store.saveMedia(noteId, e.getValue(), ext);
+                        content = content.replace("/pending-media/" + id + "/" + f, url);
+                    }
+                    // 可选 AI 分类
+                    String reason = "";
+                    if (auto) {
+                        Map<String, Object> tree = store.loadTree();
+                        Map<String, Object> scopeNode = store.findChild(tree, scope);
+                        List<String> flat = scopeNode == null ? new ArrayList<>()
+                                : store.flattenTree(scopeNode, "");
+                        Map<String, Object> res = classifier.classify(scope, title, content, flat);
+                        Map<String, Object> norm = classifier.normalizePath(store, scope, Json.strList(res, "path"));
+                        category = Json.strList(norm, "path");
+                        categoryId = Json.str(norm, "categoryId", "");
+                        reason = Json.str(res, "reason", "");
+                    } else if (categoryId == null || categoryId.isBlank()) {
+                        Map<String, Object> leaf = store.ensureCategoryInTree(scope, category, null);
+                        categoryId = Json.str(leaf, "id", "");
+                    }
+                    store.update(noteId, null, scope, content, categoryId, category);
+                    Map<String, Object> meta2 = store.getMeta(noteId);
+                    if (aiTitle) { meta2.put("aiTitle", true); store.writeMeta(meta2); }
+                    if (auto) { meta2.put("aiReason", reason); store.writeMeta(meta2); }
+                    pending.delete(id);
+                    json(ex, 200, meta2);
+                    return;
+                }
+            }
+        }
+
+        // ---- 导出笔记包（zip，供手机接收同步） ----
+        if (seg[0].equals("export-pack") && method.equals("POST")) {
+            Map<String, Object> body = readJson(ex);
+            List<String> ids = Json.strList(body, "ids");
+            if (ids.isEmpty()) throw new IOException("请先勾选要导出的笔记");
+            byte[] zip = exportPack(ids);
+            ex.getResponseHeaders().set("Content-Type", "application/zip");
+            ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=nb-notebook-export.zip");
+            ex.sendResponseHeaders(200, zip.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(zip); }
             return;
         }
 
@@ -204,7 +365,7 @@ public final class Main {
                 Map<String, Object> parts = parseMultipart(ex);
                 byte[] file = (byte[]) parts.get("file");
                 String noteId = parts.get("noteId") == null ? "" : parts.get("noteId").toString();
-                String orig = parts.get("filename") == null ? "upload" : parts.get("filename").toString();
+                String orig = strPart(parts, "filename", "upload");
                 if (file == null || file.length == 0) throw new IOException("未收到文件");
                 String ext = orig.contains(".") ? orig.substring(orig.lastIndexOf('.') + 1).toLowerCase() : "bin";
                 if (!ext.matches("[a-z0-9]{2,5}")) ext = "bin";
@@ -319,8 +480,8 @@ public final class Main {
             byte[] file = (byte[]) parts.get("file");
             if (file == null) throw new IOException("未收到压缩包");
             String scope = parts.get("scope") == null ? "默认" : parts.get("scope").toString();
-            String title = parts.get("title") == null ? "" : parts.get("title").toString();
-            String filename = parts.get("filename") == null ? "" : parts.get("filename").toString();
+            String title = strPart(parts, "title", "");
+            String filename = strPart(parts, "filename", "");
             boolean auto = "1".equals(parts.getOrDefault("autoClassify", "0").toString());
             json(ex, 200, importZip(file, scope, title, filename, auto));
             return;
@@ -397,6 +558,27 @@ public final class Main {
         try (OutputStream os = ex.getResponseBody()) { os.write(b); }
     }
 
+    /** 待整理区媒体文件 */
+    static void servePendingMedia(HttpExchange ex, String path) throws IOException {
+        String rest = path.substring("/pending-media/".length());
+        int i = rest.indexOf('/');
+        if (i < 0) { ex.sendResponseHeaders(404, -1); ex.close(); return; }
+        String id = rest.substring(0, i);
+        String file = rest.substring(i + 1);
+        Path base = pending.dir().resolve(id).resolve("media").normalize();
+        Path f = base.resolve(file).normalize();
+        if (!f.startsWith(base) || !Files.exists(f) || !Files.isRegularFile(f)) {
+            ex.sendResponseHeaders(404, -1);
+            ex.close();
+            return;
+        }
+        byte[] b = Files.readAllBytes(f);
+        String ext = file.contains(".") ? file.substring(file.lastIndexOf('.') + 1).toLowerCase() : "png";
+        ex.getResponseHeaders().set("Content-Type", mimeType(ext));
+        ex.sendResponseHeaders(200, b.length);
+        try (OutputStream os = ex.getResponseBody()) { os.write(b); }
+    }
+
     static String saveExtracted(byte[] png) throws IOException {
         Path dir = DATA_DIR.resolve("extracted");
         Files.createDirectories(dir);
@@ -409,6 +591,58 @@ public final class Main {
         String s = p.replace("\\", "/");
         int i = s.lastIndexOf('/');
         return i >= 0 ? s.substring(i + 1) : s;
+    }
+
+    static String sanitizeFileName(String s) {
+        String r = s == null ? "" : s.replaceAll("[\\\\/:*?\"<>|\\s]+", "_").trim();
+        if (r.isEmpty()) r = "img.png";
+        if (r.length() > 80) r = r.substring(r.length() - 80);
+        return r;
+    }
+
+    /** 导出笔记包 zip：manifest.json + notes/<id>/{note.html, meta.json, media/*} */
+    static byte[] exportPack(List<String> ids) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(bos)) {
+            StringBuilder manifest = new StringBuilder();
+            manifest.append("{\"app\":\"nb-notebook\",\"version\":\"1.0\",\"exported\":\"")
+                    .append(Store.now()).append("\",\"notes\":[");
+            boolean first = true;
+            for (String id : ids) {
+                if (!store.exists(id)) continue;
+                Map<String, Object> meta = store.getMeta(id);
+                String content = store.readNote(id);
+                if (!first) manifest.append(",");
+                first = false;
+                manifest.append("{\"id\":\"").append(Json.quote(id))
+                        .append("\",\"title\":\"").append(Json.quote(Json.str(meta, "title", "")))
+                        .append("\",\"scope\":\"").append(Json.quote(Json.str(meta, "scope", "")))
+                        .append("\",\"category\":").append(Json.stringify(Json.arr(meta, "category")))
+                        .append("}");
+                zos.putNextEntry(new ZipEntry("notes/" + id + "/note.html"));
+                zos.write(content.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+                zos.putNextEntry(new ZipEntry("notes/" + id + "/meta.json"));
+                zos.write(Json.stringify(meta).getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+                Path md = DATA_DIR.resolve("notes").resolve(id).resolve("media");
+                if (Files.isDirectory(md)) {
+                    try (DirectoryStream<Path> ds = Files.newDirectoryStream(md)) {
+                        for (Path p : ds) {
+                            if (!Files.isRegularFile(p)) continue;
+                            zos.putNextEntry(new ZipEntry("notes/" + id + "/media/" + p.getFileName()));
+                            zos.write(Files.readAllBytes(p));
+                            zos.closeEntry();
+                        }
+                    }
+                }
+            }
+            manifest.append("]}");
+            zos.putNextEntry(new ZipEntry("manifest.json"));
+            zos.write(manifest.toString().getBytes(StandardCharsets.UTF_8));
+            zos.closeEntry();
+        }
+        return bos.toByteArray();
     }
 
     /** 占位标题判断：用户未明确指定标题 */
@@ -623,15 +857,53 @@ public final class Main {
             byte[] data = Arrays.copyOfRange(body, headerEnd + 4, partEnd);
             if (name != null) {
                 if (filename != null) {
-                    out.put(name, data);
-                    out.put("filename", filename);
+                    putPart(out, name, data);
+                    putPart(out, name + ".filename", filename);
+                    out.put("filename", filename); // 兼容旧调用（单文件场景取最后一个）
                 } else {
-                    out.put(name, new String(data, StandardCharsets.UTF_8));
+                    putPart(out, name, new String(data, StandardCharsets.UTF_8));
                 }
             }
             pos = next;
         }
         return out;
+    }
+
+    /** 读取 multipart 文本字段：单值或 List 取最后一个 */
+    static String strPart(Map<String, Object> parts, String name, String dflt) {
+        Object v = parts.get(name);
+        if (v == null) return dflt;
+        if (v instanceof List<?> l) return l.isEmpty() ? dflt : String.valueOf(l.get(l.size() - 1));
+        return v.toString();
+    }
+
+    /** 同名 multipart 字段出现多次时合并为 List，单次保持原类型 */
+    @SuppressWarnings("unchecked")
+    static void putPart(Map<String, Object> out, String name, Object value) {
+        Object old = out.get(name);
+        if (old == null) {
+            out.put(name, value);
+        } else if (old instanceof List<?>) {
+            List<Object> l = new ArrayList<>((List<Object>) old);
+            l.add(value);
+            out.put(name, l);
+        } else {
+            List<Object> l = new ArrayList<>();
+            l.add(old);
+            l.add(value);
+            out.put(name, l);
+        }
+    }
+
+    /** 读取 multipart 字段：可能是单值或 List（同名多 part） */
+    @SuppressWarnings("unchecked")
+    static List<Object> partsOf(Map<String, Object> parts, String name) {
+        Object v = parts.get(name);
+        if (v == null) return List.of();
+        if (v instanceof List<?>) return (List<Object>) v;
+        List<Object> l = new ArrayList<>();
+        l.add(v);
+        return l;
     }
 
     record MatcherBoundary(String boundary) {}

@@ -205,48 +205,79 @@ public class MainActivity extends AppCompatActivity {
     // ================= 采集面板 =================
     private LinearLayout buildCapturePanel() {
         TextView head = new TextView(this);
-        head.setText("📴 离线采集");
+        head.setText("📴 采集终端");
         head.setTextSize(18);
         head.setTextColor(Color.rgb(31, 45, 61));
-        head.setPadding(20, 30, 20, 6);
+        head.setPadding(20, 24, 20, 4);
+
+        connStatus = new TextView(this);
+        connStatus.setTextSize(13);
+        connStatus.setPadding(20, 0, 20, 8);
+        refreshCaptureStatus();
 
         TextView desc = new TextView(this);
-        desc.setText("不依赖网络，随时记录卷子上的知识点：\n\n" +
-                "1. 拍照 / 写字 / 描边\n" +
-                "2. 导出压缩包 → 选微信发送到电脑\n" +
-                "3. 电脑端网页点「📦 手机包」导入整理（可 AI 分类）");
-        desc.setTextSize(14);
+        desc.setText("拍照 / 写字 / 描边，每一条自动直传到电脑「待整理区」。\n" +
+                "手绘图用红笔圈框，自动识别裁剪；没连上时内容留在本地，可导出 zip 发电脑兜底。");
+        desc.setTextSize(13);
         desc.setTextColor(Color.rgb(80, 96, 116));
-        desc.setLineSpacing(6, 1);
-        desc.setPadding(20, 0, 20, 24);
+        desc.setLineSpacing(5, 1);
+        desc.setPadding(20, 0, 20, 18);
 
         Button enter = new Button(this);
-        enter.setText("进入离线采集");
+        enter.setText("进入采集");
         enter.setTextSize(16);
         enter.setAllCaps(false);
         enter.setTextColor(Color.WHITE);
         enter.setBackgroundColor(Color.rgb(47, 109, 246));
         LinearLayout.LayoutParams enterLp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 200);
+                LinearLayout.LayoutParams.MATCH_PARENT, 170);
         enterLp.leftMargin = 40; enterLp.rightMargin = 40;
         enter.setLayoutParams(enterLp);
         enter.setOnClickListener(v ->
                 startActivity(new Intent(this, OfflineCaptureActivity.class)));
+
+        Button local = new Button(this);
+        local.setText("📄 本地笔记（导入电脑包 · 离线看）");
+        local.setTextSize(14);
+        local.setAllCaps(false);
+        local.setTextColor(Color.rgb(31, 45, 61));
+        local.setBackgroundColor(Color.WHITE);
+        LinearLayout.LayoutParams localLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 150);
+        localLp.leftMargin = 40; localLp.rightMargin = 40; localLp.topMargin = 12;
+        local.setLayoutParams(localLp);
+        local.setOnClickListener(v ->
+                startActivity(new Intent(this, LocalNotesActivity.class)));
 
         TextView footer = new TextView(this);
         footer.setText("© 2026 类人群星闪耀时 @豆包 · 北中小作坊");
         footer.setTextSize(11);
         footer.setTextColor(Color.rgb(160, 160, 160));
         footer.setGravity(Gravity.CENTER);
-        footer.setPadding(0, 50, 0, 0);
+        footer.setPadding(0, 40, 0, 0);
 
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.addView(head);
+        panel.addView(connStatus);
         panel.addView(desc);
         panel.addView(enter);
+        panel.addView(local);
         panel.addView(footer);
         return panel;
+    }
+
+    private TextView connStatus;
+
+    private void refreshCaptureStatus() {
+        if (connStatus == null) return;
+        if (connected) {
+            connStatus.setText("● 已连电脑 " + serverUrl + " —— 采集即直传待整理区");
+            connStatus.setTextColor(Color.rgb(24, 160, 88));
+        } else {
+            connStatus.setText("○ 未连接 —— 离线采集，本地留底，可导出 zip 兜底");
+            connStatus.setTextColor(Color.rgb(229, 72, 77));
+        }
     }
 
     // ================= 设置面板 =================
@@ -393,6 +424,7 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     connected = false;
                     updateStatus();
+                    refreshCaptureStatus();
                     if (silent) {
                         navHint.setText("连接失败：" + e.getMessage() + "\n点「⚙️ 设置」重新配置，或直接用「✍️ 采集」离线模式");
                     } else {
@@ -423,6 +455,7 @@ public class MainActivity extends AppCompatActivity {
             noteListBox.removeAllViews();
         }
         statusText.setText("已连接 " + serverUrl);
+        refreshCaptureStatus();
         showPanel(0);
         refreshTabStyle();
         Toast.makeText(this, "已连接电脑 ✓", Toast.LENGTH_SHORT).show();

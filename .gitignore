@@ -21,3 +21,12 @@ upload_check*
 # IDE
 .idea/
 *.iml
+
+# OpenCV 下载临时文件（模块已拷贝到 android/opencv/）
+opencv-sdk.zip
+opencv-sdk-dir/
+
+# 各模块构建产物
+android/**/build/
+android/opencv/.gradle/
+

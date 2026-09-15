@@ -49,6 +49,7 @@ async function init() {
   }
   await loadTree();
   await loadNotes();
+  await loadPendingCount();
 }
 
 async function loadTree() {
@@ -471,6 +472,94 @@ function openImportZipModal() {
     }, "开始导入");
 }
 
+// ---------- 待整理区（手机实时采集缓冲区） ----------
+async function loadPendingCount() {
+  try {
+    const j = await api("/api/pending");
+    const n = (j.pending || []).length;
+    $("#pendingCount").textContent = n;
+    $("#btnPending").classList.toggle("primary", n > 0);
+  } catch (e) { /* 服务器未就绪忽略 */ }
+}
+
+async function openPendingPanel() {
+  const j = await api("/api/pending");
+  const list = j.pending || [];
+  if (!list.length) { alert("待整理区是空的 —— 手机实时采集的内容会先进这里，等你确认入库"); return; }
+  openModal("📥 待整理区（手机直传缓冲区）",
+    `<p style="font-size:12px;color:var(--sub);margin-bottom:10px">手机拍照/写字/描边后自动上传到这里。确认入库（可 AI 分类）后才会进入正式笔记。</p>
+     <div id="pendingList">${list.map(renderPendingCard).join("")}</div>`,
+    async () => { closeModal(); await openPendingPanel(); }, "↻ 刷新");
+}
+
+function renderPendingCard(p) {
+  const n = p.images || 0;
+  const scope = p.scope || "默认";
+  const created = String(p.created || "").replace("T", " ");
+  return `<div class="pending-card">
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600;color:var(--ink)">${esc(p.title)}</div>
+      <div style="font-size:11px;color:var(--sub);margin-top:2px">${esc(scope)} · ${created} · ${n} 张图</div>
+      <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="mini" onclick="acceptPending('${p.id}')">📥 入库</button>
+        <button class="mini danger" onclick="delPending('${p.id}')">🗑 删除</button>
+      </div>
+    </div>
+    ${n > 0 ? '<span style="color:#bbb">🖼</span>' : ""}
+  </div>`;
+}
+
+function acceptPending(id) {
+  openModal("📥 确认入库（待整理）",
+    `<label style="font-size:12px;color:var(--sub)">归入范围：
+       <select id="accScope">${scopeOptionsHtml()}</select></label>
+     <input id="accTitle" placeholder="标题（留空：AI 自动起标题）" style="width:100%;margin-top:8px">
+     <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px">
+       <input type="checkbox" id="accAI" checked> AI 自动分类（按标题+梗概）</label>`,
+    async () => {
+      const body = JSON.stringify({
+        scope: $("#accScope").value,
+        title: $("#accTitle").value.trim(),
+        autoClassify: $("#accAI").checked ? 1 : 0
+      });
+      const btn = $("#modalOk"); btn.disabled = true; btn.textContent = "入库中…";
+      try {
+        const r = await api("/api/pending/" + id + "/accept", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+        closeModal();
+        await loadTree(); await loadNotes(); await loadPendingCount();
+        alert(`已入库 ✓ 「${r.title}」` + (r.aiTitle ? "（AI 起标题）" : "") + (r.aiReason ? "\n归类理由：" + r.aiReason : ""));
+        await openPendingPanel();
+      } catch (e) { btn.disabled = false; btn.textContent = "确认入库"; alert("入库失败：" + e.message); }
+    }, "确认入库");
+}
+
+async function delPending(id) {
+  if (!confirm("删除这条待整理内容？不可恢复。")) return;
+  await api("/api/pending/" + id, { method: "DELETE" });
+  await loadPendingCount();
+  await openPendingPanel();
+}
+
+// ---------- 导出笔记包（给手机同步） ----------
+async function doExportPack() {
+  if (!state.selected.size) { alert("请先在笔记列表勾选要导出的笔记（左上角复选框）"); return; }
+  const ids = [...state.selected];
+  try {
+    const r = await fetch("/api/export-pack", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids })
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.error || "导出失败"); }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "nb-notebook-export.zip";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  } catch (e) { alert("导出失败：" + e.message); }
+}
+
 // ---------- 导入知识结构 ----------
 function openImportModal() {
   openModal("导入已有知识结构",
@@ -488,6 +577,9 @@ function openImportModal() {
       closeModal();
       alert("导入成功 ✓ 已合并到「" + scope + "」");
     });
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 function scopeOptionsHtml() {
   const scopes = (state.tree.children || []).map(s => s.name);
@@ -590,6 +682,10 @@ function bindEvents() {
 
   // 打印 / AI 整理
   $("#btnPrint").addEventListener("click", doPrint);
+  $("#btnPending").addEventListener("click", openPendingPanel);
+  $("#btnExportPack").addEventListener("click", doExportPack);
+  window.acceptPending = acceptPending;
+  window.delPending = delPending;
   $("#btnAI").addEventListener("click", aiOrganize);
   $("#btnImport").addEventListener("click", openImportModal);
   $("#btnImportZip").addEventListener("click", openImportZipModal);

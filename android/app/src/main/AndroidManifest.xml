@@ -35,6 +35,10 @@
             android:name=".NoteDetailActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize" />
+        <activity
+            android:name=".LocalNotesActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
