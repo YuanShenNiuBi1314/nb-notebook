@@ -194,6 +194,15 @@ public final class Json {
         if (v instanceof String s) try { return Integer.parseInt(s.trim()); } catch (Exception ignored) {}
         return def;
     }
+
+    /** 布尔读取：兼容 true/false、1/0、"1"/"true" */
+    public static boolean bool(Map<String, Object> m, String k, boolean def) {
+        Object v = m.get(k);
+        if (v instanceof Boolean b) return b;
+        if (v instanceof Number n) return n.intValue() != 0;
+        if (v instanceof String s) return s.equals("1") || s.equalsIgnoreCase("true") || s.equalsIgnoreCase("yes");
+        return def;
+    }
     public static List<Object> arr(Map<String, Object> m, String k) {
         Object v = m.get(k);
         return v instanceof List<?> l ? asList(l) : new ArrayList<>();

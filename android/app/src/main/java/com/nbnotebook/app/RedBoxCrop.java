@@ -16,67 +16,21 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 红框识别：识别手绘图外圈的红色边框并透视裁剪（自动去红框）。
+ * 红框识别：
+ * - crop(Bitmap)：识别手绘图外圈的红色边框并透视裁剪（自动去红框）。
+ * - maskedForOcr(Bitmap)：把红框区域涂白（跳过图片区），供 OCR 识别外部文字。
  * 用户约定：手绘图用红笔圈一个框。
- * 识别失败返回 null（调用方回退整图 + 手动裁剪）。
  */
 public final class RedBoxCrop {
 
     private RedBoxCrop() {}
 
-    /** 尝试识别并裁剪红框；失败返回 null */
+    /** 尝试识别并裁剪红框；失败返回 null（调用方回退整图 + 手动裁剪） */
     public static Bitmap crop(Bitmap src) {
         Mat srcMat = new Mat();
         Utils.bitmapToMat(src, srcMat);
         try {
-            Mat hsv = new Mat();
-            Mat bgr = new Mat();
-            Imgproc.cvtColor(srcMat, bgr, Imgproc.COLOR_RGBA2BGR);
-            Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV);
-            bgr.release();
-
-            // 红色掩膜（HSV 红 = H 0-10 或 170-180）
-            Mat mask1 = new Mat(), mask2 = new Mat();
-            Core.inRange(hsv, new Scalar(0, 60, 60), new Scalar(12, 255, 255), mask1);
-            Core.inRange(hsv, new Scalar(168, 60, 60), new Scalar(180, 255, 255), mask2);
-            Core.bitwise_or(mask1, mask2, mask1);
-            Mat mask = mask1;
-            mask2.release();
-            hsv.release();
-
-            // 闭运算连接断线，开运算去噪
-            Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(7, 7));
-            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel);
-            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel);
-            kernel.release();
-
-            // 轮廓
-            List<MatOfPoint> contours = new ArrayList<>();
-            Mat hierarchy = new Mat();
-            Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
-            hierarchy.release();
-            mask.release();
-
-            double totalArea = srcMat.size().area();
-            MatOfPoint2f best = null;
-            double bestArea = 0;
-            for (MatOfPoint c : contours) {
-                double area = Imgproc.contourArea(c);
-                if (area < totalArea * 0.02) { c.release(); continue; }
-                MatOfPoint2f c2 = new MatOfPoint2f(c.toArray());
-                c.release();
-                MatOfPoint2f approx = new MatOfPoint2f();
-                double peri = Imgproc.arcLength(c2, true);
-                Imgproc.approxPolyDP(c2, approx, 0.04 * peri, true);
-                c2.release();
-                if (approx.total() == 4 && area > bestArea) {
-                    if (best != null) best.release();
-                    best = approx;
-                    bestArea = area;
-                } else {
-                    approx.release();
-                }
-            }
+            MatOfPoint2f best = detectBox(srcMat);
             if (best == null) return null;
 
             // 四点排序：左上 右上 右下 左下
@@ -109,6 +63,84 @@ public final class RedBoxCrop {
         } finally {
             srcMat.release();
         }
+    }
+
+    /**
+     * 生成 OCR 专用图：红框区域涂白（跳过图片区），供 OCR 识别红框外的文字。
+     * 无红框时返回原图（整张 OCR）；失败返回原图。
+     */
+    public static Bitmap maskedForOcr(Bitmap src) {
+        Mat srcMat = new Mat();
+        Utils.bitmapToMat(src, srcMat);
+        try {
+            MatOfPoint2f box = detectBox(srcMat);
+            if (box == null) return src; // 无红框 → 原图
+            // 红框区（含边框）涂白
+            MatOfPoint poly = new MatOfPoint(box.toArray());
+            Imgproc.fillConvexPoly(srcMat, poly, new Scalar(255, 255, 255, 255));
+            poly.release();
+            box.release();
+            Bitmap out = src.copy(Bitmap.Config.ARGB_8888, true);
+            Utils.matToBitmap(srcMat, out);
+            return out;
+        } catch (Exception e) {
+            return src;
+        } finally {
+            srcMat.release();
+        }
+    }
+
+    /** 检测红色矩形框，返回四点 MatOfPoint2f；失败返回 null（不释放调用方需释放） */
+    private static MatOfPoint2f detectBox(Mat srcMat) {
+        Mat hsv = new Mat();
+        Mat bgr = new Mat();
+        Imgproc.cvtColor(srcMat, bgr, Imgproc.COLOR_RGBA2BGR);
+        Imgproc.cvtColor(bgr, hsv, Imgproc.COLOR_BGR2HSV);
+        bgr.release();
+
+        // 红色掩膜（HSV 红 = H 0-12 或 168-180）
+        Mat mask1 = new Mat(), mask2 = new Mat();
+        Core.inRange(hsv, new Scalar(0, 60, 60), new Scalar(12, 255, 255), mask1);
+        Core.inRange(hsv, new Scalar(168, 60, 60), new Scalar(180, 255, 255), mask2);
+        Core.bitwise_or(mask1, mask2, mask1);
+        Mat mask = mask1;
+        mask2.release();
+        hsv.release();
+
+        // 闭运算连接断线，开运算去噪
+        Mat kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(7, 7));
+        Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel);
+        Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel);
+        kernel.release();
+
+        // 轮廓
+        List<MatOfPoint> contours = new ArrayList<>();
+        Mat hierarchy = new Mat();
+        Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+        hierarchy.release();
+        mask.release();
+
+        double totalArea = srcMat.size().area();
+        MatOfPoint2f best = null;
+        double bestArea = 0;
+        for (MatOfPoint c : contours) {
+            double area = Imgproc.contourArea(c);
+            if (area < totalArea * 0.02) { c.release(); continue; }
+            MatOfPoint2f c2 = new MatOfPoint2f(c.toArray());
+            c.release();
+            MatOfPoint2f approx = new MatOfPoint2f();
+            double peri = Imgproc.arcLength(c2, true);
+            Imgproc.approxPolyDP(c2, approx, 0.04 * peri, true);
+            c2.release();
+            if (approx.total() == 4 && area > bestArea) {
+                if (best != null) best.release();
+                best = approx;
+                bestArea = area;
+            } else {
+                approx.release();
+            }
+        }
+        return best;
     }
 
     private static Point[] orderPoints(Point[] pts) {

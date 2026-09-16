@@ -159,7 +159,7 @@ public class LocalNotesActivity extends AppCompatActivity {
             File mf = new File(dir, "meta.json");
             if (mf.exists()) {
                 JSONObject meta = new JSONObject(new String(java.nio.file.Files.readAllBytes(mf.toPath()), StandardCharsets.UTF_8));
-                title = meta.optString("title", title);
+                title = meta.optString("subject", meta.optString("title", title));
                 scope = meta.optString("scope", "");
             }
         } catch (Exception ignored) {}

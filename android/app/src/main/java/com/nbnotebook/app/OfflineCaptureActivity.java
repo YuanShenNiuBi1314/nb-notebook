@@ -72,6 +72,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
     private static final class Item {
         final String type;   // photo | text | draw
         String file;
+        String ocrFile;      // OCR 专用图（红框区已涂白），仅 photo
         String text;
         String status;       // local | uploaded
         String note;         // 附加说明（如 红框裁剪）
@@ -79,6 +80,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
             this.type = type; this.file = file; this.text = text;
             this.status = "local";
             this.note = "";
+            this.ocrFile = null;
         }
     }
 
@@ -269,6 +271,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
             // 红框识别可能较慢，后台处理
             new Thread(() -> {
                 String note = "";
+                String ocrName = null;
                 try {
                     Bitmap bmp = BitmapFactory.decodeFile(photo.getAbsolutePath());
                     if (bmp != null) {
@@ -281,15 +284,27 @@ public class OfflineCaptureActivity extends AppCompatActivity {
                             cropped.recycle();
                             note = "已自动红框裁剪";
                         }
+                        // OCR 专用图：红框区涂白（跳过图片区），无红框则整图
+                        Bitmap ocr = RedBoxCrop.maskedForOcr(bmp);
+                        if (ocr != null && ocr != bmp) {
+                            File ocrFile = new File(captureDir, photo.getName().replace(".jpg", ".ocr.jpg"));
+                            try (FileOutputStream fos = new FileOutputStream(ocrFile)) {
+                                ocr.compress(Bitmap.CompressFormat.JPEG, 92, fos);
+                            }
+                            ocr.recycle();
+                            ocrName = ocrFile.getName();
+                        }
                         bmp.recycle();
                     }
                 } catch (Exception e) {
                     note = "";
                 }
                 final String n = note;
+                final String ocr = ocrName;
                 runOnUiThread(() -> {
                     Item it = new Item("photo", photo.getName(), null);
                     it.note = n;
+                    it.ocrFile = ocr;
                     items.add(it);
                     persist();
                     refreshList();
@@ -396,6 +411,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
                 o.put("status", it.status);
                 o.put("note", it.note == null ? "" : it.note);
                 if (it.file != null) o.put("file", it.file);
+                if (it.ocrFile != null) o.put("ocrFile", it.ocrFile);
                 if (it.text != null) o.put("text", it.text);
                 arr.put(o);
             }
@@ -424,6 +440,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
                     Item it = new Item(o.optString("type", "text"), o.has("file") ? o.optString("file") : null, o.has("text") ? o.optString("text") : null);
                     it.status = o.optString("status", "local");
                     it.note = o.optString("note", "");
+                    it.ocrFile = o.has("ocrFile") ? o.optString("ocrFile") : null;
                     items.add(it);
                 }
             }
@@ -475,6 +492,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
             case "draw" -> "🎨 描边";
             default -> "✏️ 文字";
         };
+        if (item.ocrFile != null) label += " · OCR";
         if (!item.note.isEmpty()) label += " " + item.note;
         String text = item.type.equals("text")
                 ? (item.text.length() > 26 ? item.text.substring(0, 26) + "…" : item.text)
@@ -517,6 +535,7 @@ public class OfflineCaptureActivity extends AppCompatActivity {
                 meta.put("title", "");
                 JSONArray arr = new JSONArray();
                 List<File> imgs = new ArrayList<>();
+                List<File> ocrImgs = new ArrayList<>();
                 for (Item it : todo) {
                     JSONObject o = new JSONObject();
                     o.put("type", it.type);
@@ -527,11 +546,18 @@ public class OfflineCaptureActivity extends AppCompatActivity {
                             o.put("file", it.file);
                             imgs.add(f);
                         }
+                        if (it.ocrFile != null) {
+                            File of = new File(captureDir, it.ocrFile);
+                            if (of.exists()) {
+                                o.put("ocrFile", it.ocrFile);
+                                ocrImgs.add(of);
+                            }
+                        }
                     }
                     arr.put(o);
                 }
                 meta.put("items", arr);
-                String resp = multipartUpload(serverUrl + "/api/capture", meta, imgs);
+                String resp = multipartUpload(serverUrl + "/api/capture", meta, imgs, ocrImgs);
                 JSONObject r = new JSONObject(resp);
                 if (r.optBoolean("ok", false)) {
                     runOnUiThread(() -> {
@@ -555,8 +581,8 @@ public class OfflineCaptureActivity extends AppCompatActivity {
         }).start();
     }
 
-    /** 手写 multipart 上传：meta JSON + 多图 */
-    private static String multipartUpload(String url, JSONObject meta, List<File> images) throws Exception {
+    /** 手写 multipart 上传：meta JSON + 主图 + OCR 专用图 */
+    private static String multipartUpload(String url, JSONObject meta, List<File> images, List<File> ocrImages) throws Exception {
         String boundary = "----nb" + System.currentTimeMillis();
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod("POST");
@@ -575,6 +601,17 @@ public class OfflineCaptureActivity extends AppCompatActivity {
         for (File f : images) {
             body.write(("--" + boundary + CRLF).getBytes(StandardCharsets.UTF_8));
             body.write(("Content-Disposition: form-data; name=\"images\"; filename=\"" + f.getName() + "\"\r\n").getBytes(StandardCharsets.UTF_8));
+            body.write("Content-Type: image/jpeg\r\n\r\n".getBytes(StandardCharsets.UTF_8));
+            try (FileInputStream fis = new FileInputStream(f)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = fis.read(buf)) > 0) body.write(buf, 0, n);
+            }
+            body.write(CRLF);
+        }
+        for (File f : ocrImages) {
+            body.write(("--" + boundary + CRLF).getBytes(StandardCharsets.UTF_8));
+            body.write(("Content-Disposition: form-data; name=\"ocr_images\"; filename=\"" + f.getName() + "\"\r\n").getBytes(StandardCharsets.UTF_8));
             body.write("Content-Type: image/jpeg\r\n\r\n".getBytes(StandardCharsets.UTF_8));
             try (FileInputStream fis = new FileInputStream(f)) {
                 byte[] buf = new byte[8192];

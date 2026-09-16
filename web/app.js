@@ -150,7 +150,7 @@ function renderNotes() {
   const grid = $("#noteGrid");
   grid.innerHTML = "";
   const q = ($("#searchInput").value || "").trim().toLowerCase();
-  const list = state.notes.filter(n => !q || (n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q));
+  const list = state.notes.filter(n => !q || (n.subject || n.title || "").toLowerCase().includes(q) || (n.content || "").toLowerCase().includes(q));
   $("#noteCount").textContent = list.length + " 条";
   $("#emptyState").classList.toggle("hidden", list.length > 0);
   grid.classList.toggle("hidden", list.length === 0);
@@ -161,7 +161,7 @@ function renderNotes() {
 function card(n) {
   const el = document.createElement("div");
   el.className = "note-card" + (state.selected.has(n.id) ? " selected" : "");
-  const t = document.createElement("div"); t.className = "t"; t.textContent = n.title || "无标题";
+  const t = document.createElement("div"); t.className = "t"; t.textContent = n.subject || n.title || "无标题";
   const path = document.createElement("div"); path.className = "path";
   path.textContent = [n.scope, ...(n.category || [])].filter(Boolean).join(" › ");
   const meta = document.createElement("div"); meta.className = "meta";
@@ -197,7 +197,7 @@ function updatePrintCount() {
 async function openEditor(id) {
   state.editing = id;
   const meta = await api("/api/notes/" + id);
-  $("#noteTitle").value = meta.title || "";
+  $("#noteTitle").value = meta.subject || meta.title || "";
   $("#noteScope").value = meta.scope || "默认";
   $("#noteCategory").value = (meta.category || []).join(" › ");
   $("#srcBox").value = meta.content || "";
@@ -229,10 +229,10 @@ function syncSourceFromPreview() {
 /** 确保当前笔记已落盘，返回 id；新建则先创建草稿 */
 async function ensureSaved() {
   if (state.editing) return state.editing;
-  const title = $("#noteTitle").value.trim() || "无标题笔记";
+  const subject = $("#noteTitle").value.trim() || "无标题笔记";
   const scope = $("#noteScope").value || "默认";
   const content = $("#srcBox").value || "";
-  const meta = await postJson("/api/notes", { title, scope, content, autoClassify: 0 });
+  const meta = await postJson("/api/notes", { subject, scope, content, autoClassify: 0 });
   state.editing = meta.id;
   return meta.id;
 }
@@ -240,19 +240,19 @@ async function ensureSaved() {
 async function saveNote(autoClassify = false) {
   if (state.editMode === "source") syncPreviewFromSource(); else syncSourceFromPreview();
   const content = $("#srcBox").value;
-  const title = $("#noteTitle").value.trim() || "无标题笔记";
+  const subject = $("#noteTitle").value.trim() || "无标题笔记";
   const scope = $("#noteScope").value || "默认";
   const isNew = !state.editing;
   let meta;
   if (isNew) {
-    meta = await postJson("/api/notes", { title, scope, content, autoClassify: autoClassify ? 1 : 0 });
+    meta = await postJson("/api/notes", { subject, scope, content, autoClassify: autoClassify ? 1 : 0 });
     state.editing = meta.id;
   } else {
-    meta = await api("/api/notes/" + state.editing, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title, scope, content }) });
+    meta = await api("/api/notes/" + state.editing, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ subject, scope, content }) });
   }
   if (meta.aiTitle) {
-    $("#noteTitle").value = meta.title;
-    showAiResult("🤖 AI 已自动起标题：" + meta.title, false);
+    $("#noteTitle").value = meta.subject || meta.title;
+    showAiResult("🤖 AI 已自动起主题：" + (meta.subject || meta.title), false);
   }
   if (autoClassify) {
     const res = await postJson("/api/notes/classify-again", { id: state.editing, scope });
@@ -336,7 +336,7 @@ async function doPrint() {
   // 提示含视频/音频的笔记
   const mediaNotes = state.notes.filter(n => ids.includes(n.id) && n.media && (n.media.video || n.media.audio));
   if (mediaNotes.length > 0) {
-    const names = mediaNotes.map(n => "《" + n.title + "》").join("、");
+    const names = mediaNotes.map(n => "《" + (n.subject || n.title) + "》").join("、");
     if (!confirm("以下笔记含有视频/音频，打印时将被自动去除（只保留文字和图片）：\n\n" + names + "\n\n继续打印？")) return;
   }
   try {
@@ -387,7 +387,7 @@ function openExtractPanel() {
   if (target) {
     const cur = state.notes.find(n => n.id === target);
     tn.classList.remove("hidden");
-    $("#extractNoteName").textContent = cur ? cur.title : target;
+    $("#extractNoteName").textContent = cur ? (cur.subject || cur.title) : target;
   } else tn.classList.add("hidden");
 }
 async function handleExtractFile(file) {
@@ -438,8 +438,8 @@ function renderExtractResults() {
 function openImportZipModal() {
   openModal("📦 导入手机采集包",
     `<p style="margin-bottom:10px">选择手机「离线采集」导出的 zip 压缩包（微信传到电脑后保存到本地再选）：</p>
-     <label style="font-size:12px;color:var(--sub)">笔记标题：
-       <input type="text" id="importZipTitle" placeholder="留空：AI 自动起标题" style="margin-top:4px"></label>
+     <label style="font-size:12px;color:var(--sub)">笔记主题：
+       <input type="text" id="importZipTitle" placeholder="留空：AI 自动起主题" style="margin-top:4px"></label>
      <label style="font-size:12px;color:var(--sub);margin-top:8px">归入范围：
        <select id="importZipScope">${scopeOptionsHtml()}</select></label>
      <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px">
@@ -449,12 +449,12 @@ function openImportZipModal() {
       const file = $("#importZipFile").files[0];
       if (!file) { alert("请先选择 zip 压缩包"); return; }
       const scope = $("#importZipScope").value;
-      const title = $("#importZipTitle").value.trim();
+      const subject = $("#importZipTitle").value.trim();
       const auto = $("#importZipAI").checked ? 1 : 0;
       const fd = new FormData();
       fd.append("file", file);
       fd.append("scope", scope);
-      fd.append("title", title);
+      fd.append("subject", subject);
       fd.append("autoClassify", auto);
       const btn = $("#modalOk");
       btn.disabled = true; btn.textContent = "导入中…";
@@ -462,8 +462,8 @@ function openImportZipModal() {
         const r = await api("/api/import-zip", { method: "POST", body: fd });
         closeModal();
         await loadTree(); await loadNotes();
-        alert(`导入成功 ✓ 「${r.title}」\n${r.images} 张图片 · ${r.items} 个条目` +
-              (r.aiTitle ? "\n🤖 AI 已自动起标题" : "") +
+        alert(`导入成功 ✓ 「${r.subject || r.title}」\n${r.images} 张图片 · ${r.items} 个条目` +
+              (r.aiTitle ? "\n🤖 AI 已自动起主题" : "") +
               (r.aiReason ? "\nAI 归类理由：" + r.aiReason : ""));
       } catch (e) {
         btn.disabled = false; btn.textContent = "开始导入";
@@ -498,7 +498,7 @@ function renderPendingCard(p) {
   const created = String(p.created || "").replace("T", " ");
   return `<div class="pending-card">
     <div style="flex:1;min-width:0">
-      <div style="font-weight:600;color:var(--ink)">${esc(p.title)}</div>
+      <div style="font-weight:600;color:var(--ink)">${esc(p.subject || p.title)}</div>
       <div style="font-size:11px;color:var(--sub);margin-top:2px">${esc(scope)} · ${created} · ${n} 张图</div>
       <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="mini" onclick="acceptPending('${p.id}')">📥 入库</button>
@@ -513,21 +513,24 @@ function acceptPending(id) {
   openModal("📥 确认入库（待整理）",
     `<label style="font-size:12px;color:var(--sub)">归入范围：
        <select id="accScope">${scopeOptionsHtml()}</select></label>
-     <input id="accTitle" placeholder="标题（留空：AI 自动起标题）" style="width:100%;margin-top:8px">
+     <input id="accTitle" placeholder="主题（留空：AI 自动起主题）" style="width:100%;margin-top:8px">
      <label style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:13px">
-       <input type="checkbox" id="accAI" checked> AI 自动分类（按标题+梗概）</label>`,
+       <input type="checkbox" id="accAI" checked> AI 自动分类（按主题+梗概）</label>
+     <label style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:13px">
+       <input type="checkbox" id="accOcr" checked> 📝 OCR 识别图片文字（自动跳过红框图片区）</label>`,
     async () => {
       const body = JSON.stringify({
         scope: $("#accScope").value,
-        title: $("#accTitle").value.trim(),
-        autoClassify: $("#accAI").checked ? 1 : 0
+        subject: $("#accTitle").value.trim(),
+        autoClassify: $("#accAI").checked ? 1 : 0,
+        ocr: $("#accOcr").checked ? 1 : 0
       });
       const btn = $("#modalOk"); btn.disabled = true; btn.textContent = "入库中…";
       try {
         const r = await api("/api/pending/" + id + "/accept", { method: "POST", headers: { "Content-Type": "application/json" }, body });
         closeModal();
         await loadTree(); await loadNotes(); await loadPendingCount();
-        alert(`已入库 ✓ 「${r.title}」` + (r.aiTitle ? "（AI 起标题）" : "") + (r.aiReason ? "\n归类理由：" + r.aiReason : ""));
+        alert(`已入库 ✓ 「${r.subject || r.title}」` + (r.aiTitle ? "（AI 起主题）" : "") + (r.aiReason ? "\n归类理由：" + r.aiReason : ""));
         await openPendingPanel();
       } catch (e) { btn.disabled = false; btn.textContent = "确认入库"; alert("入库失败：" + e.message); }
     }, "确认入库");

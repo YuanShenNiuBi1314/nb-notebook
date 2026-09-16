@@ -45,7 +45,7 @@ public final class PendingStore {
         meta.put("id", id);
         meta.put("created", now());
         meta.put("scope", scope == null || scope.isBlank() ? "默认" : scope);
-        meta.put("title", title == null || title.isBlank() ? "待整理 " + now() : title);
+        meta.put("subject", title == null || title.isBlank() ? "待整理 " + now() : title);
         meta.put("images", files.size());
         meta.put("media", files);
         Files.write(d.resolve("meta.json"), Json.stringify(meta).getBytes(StandardCharsets.UTF_8));

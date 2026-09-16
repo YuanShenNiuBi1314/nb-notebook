@@ -37,10 +37,10 @@ public final class Main {
         pending = new PendingStore(DATA_DIR);
 
         // OLLAMA 探测
-        classifier = new Classifier("http://127.0.0.1:11434", "qwen3:8b");
+        classifier = new Classifier("http://127.0.0.1:11434", "qwen3:8b", "qwen3-vl:30b");
         String ollamaErr = classifier.probe();
         if (ollamaErr != null) System.out.println("[警告] " + ollamaErr);
-        else System.out.println("[OK] OLLAMA 可用，分类模型: " + classifier.getModel());
+        else System.out.println("[OK] OLLAMA 可用，分类模型: " + classifier.getModel() + "，OCR 视觉模型: " + classifier.getVisionModel());
 
         // 清理历史临时提取文件
         cleanTmp();
@@ -97,6 +97,7 @@ public final class Main {
             out.put("ok", true);
             out.put("version", VERSION);
             out.put("model", classifier.getModel());
+            out.put("visionModel", classifier.getVisionModel());
             out.put("lanIps", lanIps());
             out.put("port", ex.getLocalAddress().getPort());
             json(ex, 200, out);
@@ -107,14 +108,14 @@ public final class Main {
         if (seg[0].equals("capture") && method.equals("POST")) {
             Map<String, Object> parts = parseMultipart(ex);
             String scope = "默认";
-            String title = "";
+            String subject = "";
             List<Map<String, Object>> items = new ArrayList<>();
             Object metaObj = parts.get("meta");
             if (metaObj instanceof byte[] bb) metaObj = new String(bb, StandardCharsets.UTF_8);
             if (metaObj != null) {
                 Map<String, Object> meta = Json.asMap(Json.parse(metaObj.toString()));
                 scope = Json.str(meta, "scope", scope);
-                title = Json.str(meta, "title", "");
+                subject = Json.str(meta, "subject", Json.str(meta, "title", ""));
                 for (Object o : Json.arr(meta, "items")) {
                     if (o instanceof Map<?, ?> m) items.add(Json.asMap(m));
                 }
@@ -128,6 +129,17 @@ public final class Main {
                     String fn = i < fnames.size() && fnames.get(i) != null
                             ? fnames.get(i).toString() : "img" + (i + 1) + ".png";
                     if (fn == null || fn.isBlank()) fn = "img" + (i + 1) + ".png";
+                    media.put(sanitizeFileName(fn), b);
+                }
+            }
+            // OCR 专用图（红框区已涂白，识别时跳过图片区）：文件名与主图对应
+            List<Object> ocrImgs = partsOf(parts, "ocr_images");
+            List<Object> ocrNames = partsOf(parts, "ocr_images.filename");
+            for (int i = 0; i < ocrImgs.size(); i++) {
+                if (ocrImgs.get(i) instanceof byte[] b) {
+                    String fn = i < ocrNames.size() && ocrNames.get(i) != null
+                            ? ocrNames.get(i).toString() : "ocr" + (i + 1) + ".jpg";
+                    if (fn == null || fn.isBlank()) fn = "ocr" + (i + 1) + ".jpg";
                     media.put(sanitizeFileName(fn), b);
                 }
             }
@@ -156,7 +168,7 @@ public final class Main {
                     html.append("<p><img src=\"/pm/").append(f).append("\" alt=\"采集图片\"></p>\n");
                 }
             }
-            Map<String, Object> meta = pending.create(scope, title, html.toString(), media);
+            Map<String, Object> meta = pending.create(scope, subject, html.toString(), media);
             // 替换占位 → 真实待整理媒体路径
             String id = (String) meta.get("id");
             Path cf = pending.dir().resolve(id).resolve("content.html");
@@ -194,22 +206,56 @@ public final class Main {
                 if (seg.length == 3 && seg[2].equals("accept") && method.equals("POST")) {
                     Map<String, Object> body = readJson(ex);
                     String scope = Json.str(body, "scope", Json.str(pmeta, "scope", "默认"));
-                    String title = Json.str(body, "title", "");
+                    String subject = Json.str(body, "subject", Json.str(body, "title", ""));
                     String categoryId = Json.str(body, "categoryId", "");
                     List<String> category = Json.strList(body, "category");
-                    boolean auto = Json.num(body, "autoClassify", 0) == 1;
+                    boolean auto = Json.bool(body, "autoClassify", false);
+                    boolean doOcr = Json.bool(body, "ocr", false);
                     String content = pending.readContent(id);
+                    // OCR：识别图片文字（优先红框涂白的 OCR 专用图，跳过图片区）
+                    if (doOcr) {
+                        StringBuilder ocrHtml = new StringBuilder();
+                        List<String> ocrFiles = new ArrayList<>();
+                        List<String> allFiles = new ArrayList<>();
+                        Map<String, byte[]> mediaMap = pending.readMedia(id);
+                        for (String f : mediaMap.keySet()) {
+                            if (f.contains(".ocr.")) ocrFiles.add(f);
+                            else if (!f.matches(".*\\.ocr\\.[a-z0-9]+$")) allFiles.add(f);
+                        }
+                        if (ocrFiles.isEmpty()) ocrFiles.addAll(allFiles);
+                        ocrFiles.sort(Comparator.naturalOrder());
+                        int done = 0, failed = 0;
+                        for (String f : ocrFiles) {
+                            try {
+                                String text = classifier.ocrImage(mediaMap.get(f));
+                                if (text != null && !text.isBlank()) {
+                                    ocrHtml.append("<p class=\"ocr-block\">📝 [OCR 识别 · ").append(f).append("]\n")
+                                            .append(text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>"))
+                                            .append("</p>\n");
+                                    done++;
+                                }
+                            } catch (Exception ex2) {
+                                failed++;
+                            }
+                        }
+                        if (done > 0) content = ocrHtml.toString() + content;
+                        if (failed > 0 && done == 0) {
+                            // 全部失败不阻塞入库，仅提示
+                            json(ex, 200, Map.of("ok", false, "error", "OCR 识别失败（" + failed + " 张图），请稍后重试或检查 OLLAMA 视觉模型"));
+                            return;
+                        }
+                    }
                     // 标题 AI 补全
                     boolean aiTitle = false;
-                    if (isPlaceholderTitle(title) && !content.isBlank()) {
+                    if (isPlaceholderTitle(subject) && !content.isBlank()) {
                         Map<String, Object> tRes = classifier.suggestTitle(scope, content);
                         if (Boolean.TRUE.equals(tRes.get("ok"))) {
-                            title = Json.str(tRes, "title", "无标题笔记");
+                            subject = Json.str(tRes, "subject", Json.str(tRes, "title", "无标题笔记"));
                             aiTitle = true;
                         }
                     }
                     // 创建正式笔记
-                    Map<String, Object> meta = store.create(title, scope, "", category, categoryId);
+                    Map<String, Object> meta = store.create(subject, scope, "", category, categoryId);
                     String noteId = (String) meta.get("id");
                     // 复制媒体并替换 img src
                     Map<String, byte[]> media = pending.readMedia(id);
@@ -228,7 +274,7 @@ public final class Main {
                         Map<String, Object> scopeNode = store.findChild(tree, scope);
                         List<String> flat = scopeNode == null ? new ArrayList<>()
                                 : store.flattenTree(scopeNode, "");
-                        Map<String, Object> res = classifier.classify(scope, title, content, flat);
+                        Map<String, Object> res = classifier.classify(scope, subject, content, flat);
                         Map<String, Object> norm = classifier.normalizePath(store, scope, Json.strList(res, "path"));
                         category = Json.strList(norm, "path");
                         categoryId = Json.str(norm, "categoryId", "");
@@ -278,13 +324,13 @@ public final class Main {
         if (seg[0].equals("classify") && method.equals("POST")) {
             Map<String, Object> body = readJson(ex);
             String scope = Json.str(body, "scope", "默认");
-            String title = Json.str(body, "title", "");
+            String subject = Json.str(body, "subject", Json.str(body, "title", ""));
             String content = Json.str(body, "content", "");
             Map<String, Object> tree = store.loadTree();
             Map<String, Object> scopeNode = store.findChild(tree, scope);
             List<String> flat = scopeNode == null ? new ArrayList<>()
                     : store.flattenTree(scopeNode, "");
-            json(ex, 200, classifier.classify(scope, title, content, flat));
+            json(ex, 200, classifier.classify(scope, subject, content, flat));
             return;
         }
 
@@ -297,18 +343,18 @@ public final class Main {
             }
             if (seg.length == 1 && method.equals("POST")) {
                 Map<String, Object> body = readJson(ex);
-                String title = Json.str(body, "title", "").trim();
+                String subject = Json.str(body, "subject", Json.str(body, "title", "")).trim();
                 String scope = Json.str(body, "scope", "默认");
                 String content = Json.str(body, "content", "");
                 String categoryId = Json.str(body, "categoryId", "");
-                boolean auto = Json.num(body, "autoClassify", 0) == 1;
+                boolean auto = Json.bool(body, "autoClassify", false);
                 List<String> category = Json.strList(body, "category");
                 // AI 自动补全标题：用户未明确指定标题且有正文时
                 boolean aiTitle = false;
-                if (isPlaceholderTitle(title) && !content.isBlank()) {
+                if (isPlaceholderTitle(subject) && !content.isBlank()) {
                     Map<String, Object> tRes = classifier.suggestTitle(scope, content);
                     if (Boolean.TRUE.equals(tRes.get("ok"))) {
-                        title = Json.str(tRes, "title", "无标题笔记");
+                        subject = Json.str(tRes, "subject", Json.str(tRes, "title", "无标题笔记"));
                         aiTitle = true;
                     }
                 }
@@ -318,16 +364,16 @@ public final class Main {
                     Map<String, Object> scopeNode = store.findChild(tree, scope);
                     List<String> flat = scopeNode == null ? new ArrayList<>()
                             : store.flattenTree(scopeNode, "");
-                    Map<String, Object> res = classifier.classify(scope, title, content, flat);
+                    Map<String, Object> res = classifier.classify(scope, subject, content, flat);
                     Map<String, Object> norm = classifier.normalizePath(store, scope, Json.strList(res, "path"));
                     category = Json.strList(norm, "path");
                     categoryId = Json.str(norm, "categoryId", "");
-                    meta = store.create(title, scope, content, category, categoryId);
+                    meta = store.create(subject, scope, content, category, categoryId);
                     meta.put("aiReason", Json.str(res, "reason", ""));
                     meta.put("aiOk", res.get("ok"));
                     store.writeMeta(meta);
                 } else {
-                    meta = store.create(title, scope, content, category, categoryId);
+                    meta = store.create(subject, scope, content, category, categoryId);
                     if (categoryId == null || categoryId.isBlank()) {
                         Map<String, Object> leaf = store.ensureCategoryInTree(scope, category, null);
                         meta.put("categoryId", leaf.get("id"));
@@ -353,7 +399,7 @@ public final class Main {
                 Map<String, Object> scopeNode = store.findChild(tree, scope);
                 List<String> flat = scopeNode == null ? new ArrayList<>()
                         : store.flattenTree(scopeNode, "");
-                Map<String, Object> res = classifier.classify(scope, Json.str(meta, "title", ""), content, flat);
+                Map<String, Object> res = classifier.classify(scope, Store.subjectOf(meta), content, flat);
                 Map<String, Object> norm = classifier.normalizePath(store, scope, Json.strList(res, "path"));
                 store.update(id, null, scope, null, Json.str(norm, "categoryId", ""), Json.strList(norm, "path"));
                 Map<String, Object> out = new LinkedHashMap<>(res);
@@ -389,23 +435,24 @@ public final class Main {
                 Map<String, Object> body = readJson(ex);
                 String id = seg[1];
                 if (!store.exists(id)) throw new IOException("笔记不存在");
-                String title = body.containsKey("title") ? Json.str(body, "title") : null;
+                String subject = body.containsKey("subject") || body.containsKey("title")
+                        ? Json.str(body, "subject", Json.str(body, "title", "")) : null;
                 String scope = body.containsKey("scope") ? Json.str(body, "scope") : null;
                 String content = body.containsKey("content") ? Json.str(body, "content") : null;
                 String categoryId = body.containsKey("categoryId") ? Json.str(body, "categoryId") : null;
                 List<String> category = body.containsKey("category") ? Json.strList(body, "category") : null;
                 boolean aiTitle = false;
-                if (title != null && isPlaceholderTitle(title)
+                if (subject != null && isPlaceholderTitle(subject)
                         && content != null && !content.isBlank()) {
                     String sc = scope != null && !scope.isBlank() ? scope
                             : Json.str(store.getMeta(id), "scope", "默认");
                     Map<String, Object> tRes = classifier.suggestTitle(sc, content);
                     if (Boolean.TRUE.equals(tRes.get("ok"))) {
-                        title = Json.str(tRes, "title", "无标题笔记");
+                        subject = Json.str(tRes, "subject", Json.str(tRes, "title", "无标题笔记"));
                         aiTitle = true;
                     }
                 }
-                store.update(id, title, scope, content, categoryId, category);
+                store.update(id, subject, scope, content, categoryId, category);
                 Map<String, Object> meta = store.getMeta(id);
                 if (aiTitle) {
                     meta.put("aiTitle", true);
@@ -480,10 +527,11 @@ public final class Main {
             byte[] file = (byte[]) parts.get("file");
             if (file == null) throw new IOException("未收到压缩包");
             String scope = parts.get("scope") == null ? "默认" : parts.get("scope").toString();
-            String title = strPart(parts, "title", "");
+            String subject = strPart(parts, "subject", strPart(parts, "title", ""));
             String filename = strPart(parts, "filename", "");
-            boolean auto = "1".equals(parts.getOrDefault("autoClassify", "0").toString());
-            json(ex, 200, importZip(file, scope, title, filename, auto));
+            String ac = strPart(parts, "autoClassify", "0");
+            boolean auto = ac.equals("1") || ac.equalsIgnoreCase("true");
+            json(ex, 200, importZip(file, scope, subject, filename, auto));
             return;
         }
 
@@ -615,7 +663,7 @@ public final class Main {
                 if (!first) manifest.append(",");
                 first = false;
                 manifest.append("{\"id\":\"").append(Json.quote(id))
-                        .append("\",\"title\":\"").append(Json.quote(Json.str(meta, "title", "")))
+                        .append("\",\"subject\":\"").append(Json.quote(Store.subjectOf(meta)))
                         .append("\",\"scope\":\"").append(Json.quote(Json.str(meta, "scope", "")))
                         .append("\",\"category\":").append(Json.stringify(Json.arr(meta, "category")))
                         .append("}");
@@ -659,7 +707,7 @@ public final class Main {
      * 无 manifest 时按扩展名自动归类。可触发 AI 分类。
      */
     static Map<String, Object> importZip(byte[] zipBytes, String scope, String title, String filename, boolean autoClassify) throws IOException {
-        // 标题：显式给了就用；否则先用文件名占位，内容生成后 AI 补全
+        // 标题（subject）：显式给了就用；否则先用文件名占位，内容生成后 AI 补全
         boolean titleFromFile = title == null || title.isBlank() || title.equals(filename);
         if (title == null || title.isBlank()) {
             title = filename;
@@ -744,7 +792,7 @@ public final class Main {
         if (titleFromFile && html.length() > 0) {
             Map<String, Object> tRes = classifier.suggestTitle(scope, html.toString());
             if (Boolean.TRUE.equals(tRes.get("ok"))) {
-                aiTitle = Json.str(tRes, "title", "");
+                aiTitle = Json.str(tRes, "subject", Json.str(tRes, "title", ""));
                 title = aiTitle;
                 store.update(id, title, scope, null, null, null);
             }

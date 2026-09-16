@@ -48,7 +48,8 @@ public final class Store {
         Files.createDirectories(dir.resolve("media"));
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("id", id);
-        meta.put("title", title == null || title.isBlank() ? "无标题笔记" : title.trim());
+        // subject = 标题（用户指定的专属键；AI 起标题也写入这里）
+        meta.put("subject", title == null || title.isBlank() ? "无标题笔记" : title.trim());
         meta.put("scope", scope == null ? "默认" : scope.trim());
         meta.put("category", category == null ? new ArrayList<String>() : category);
         meta.put("categoryId", categoryId == null ? "" : categoryId);
@@ -60,9 +61,9 @@ public final class Store {
         return meta;
     }
 
-    public void update(String id, String title, String scope, String content, String categoryId, List<String> category) throws IOException {
+    public void update(String id, String subject, String scope, String content, String categoryId, List<String> category) throws IOException {
         Map<String, Object> meta = getMeta(id);
-        if (title != null) meta.put("title", title.trim());
+        if (subject != null) meta.put("subject", subject.trim());
         if (scope != null) meta.put("scope", scope.trim());
         if (content != null) { writeNote(id, content); meta.put("media", scanMedia(content)); }
         if (categoryId != null) meta.put("categoryId", categoryId);
@@ -92,7 +93,19 @@ public final class Store {
     public Map<String, Object> getMeta(String id) throws IOException {
         Path f = notesDir.resolve(id).resolve("meta.json");
         if (!Files.exists(f)) throw new IOException("笔记不存在: " + id);
-        return Json.asMap(Json.parse(Files.readString(f, StandardCharsets.UTF_8)));
+        Map<String, Object> m = Json.asMap(Json.parse(Files.readString(f, StandardCharsets.UTF_8)));
+        // 兼容旧数据：subject 缺失时从旧 title 字段补
+        if (!m.containsKey("subject") && m.containsKey("title")) {
+            m.put("subject", m.get("title"));
+        }
+        return m;
+    }
+
+    /** 读取标题：优先 subject，兼容旧 title */
+    public static String subjectOf(Map<String, Object> meta) {
+        String s = Json.str(meta, "subject", "");
+        if (s != null && !s.isBlank()) return s;
+        return Json.str(meta, "title", "");
     }
 
     public String readNote(String id) throws IOException {
@@ -121,6 +134,9 @@ public final class Store {
                 if (!Files.exists(mf)) continue;
                 try {
                     Map<String, Object> meta = Json.asMap(Json.parse(Files.readString(mf, StandardCharsets.UTF_8)));
+                    if (!meta.containsKey("subject") && meta.containsKey("title")) {
+                        meta.put("subject", meta.get("title"));
+                    }
                     if (scope != null && !scope.isBlank() && !scope.equals(Json.str(meta, "scope", ""))) continue;
                     if (categoryId != null && !categoryId.isBlank() && !categoryId.equals(Json.str(meta, "categoryId", ""))) continue;
                     // 附带内容摘要（前 400 字），供前端正文搜索

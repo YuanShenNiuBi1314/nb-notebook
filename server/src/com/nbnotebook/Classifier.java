@@ -18,13 +18,20 @@ public final class Classifier {
             .connectTimeout(Duration.ofSeconds(10)).build();
     private final String ollamaBase;
     private String model;
+    private String visionModel;
 
     public Classifier(String ollamaBase, String model) {
+        this(ollamaBase, model, "qwen3-vl:30b");
+    }
+
+    public Classifier(String ollamaBase, String model, String visionModel) {
         this.ollamaBase = ollamaBase;
         this.model = model;
+        this.visionModel = visionModel;
     }
 
     public String getModel() { return model; }
+    public String getVisionModel() { return visionModel; }
 
     /** 启动时探测 OLLAMA：验证可达，并选择一个可用的文本模型 */
     public String probe() {
@@ -117,10 +124,10 @@ public final class Classifier {
         StringBuilder prompt = new StringBuilder();
         prompt.append("你是一个笔记助手。下面是一篇【").append(scope == null || scope.isBlank() ? "通用" : scope)
                 .append("】领域的笔记正文（可能是刷卷子/学习时记录的知识点）。\n");
-        prompt.append("请给它起一个简洁准确的标题，突出核心主题，例如「植物的维管束」「动物消化系统」「光合作用过程」。\n");
-        prompt.append("标题不超过 20 个字，不要带引号、不要带句号。\n\n");
+        prompt.append("请给它起一个简洁准确的主题（subject），突出核心主题，例如「植物的维管束」「动物消化系统」「光合作用过程」。\n");
+        prompt.append("主题不超过 20 个字，不要带引号、不要带句号。\n\n");
         prompt.append("正文：\n").append(text.isEmpty() ? "（无正文）" : text).append("\n\n");
-        prompt.append("只输出 JSON：{\"title\": \"标题\"}");
+        prompt.append("只输出 JSON：{\"subject\": \"主题\"}");
 
         Map<String, Object> result = new LinkedHashMap<>();
         try {
@@ -129,35 +136,97 @@ public final class Classifier {
             int start = s.indexOf('{');
             int end = s.lastIndexOf('}');
             if (start >= 0 && end > start) s = s.substring(start, end + 1);
-            String title = "";
+            String subject = "";
             try {
                 Map<String, Object> m = Json.asMap(Json.parse(s));
-                title = Json.str(m, "title", "");
+                subject = Json.str(m, "subject", Json.str(m, "title", ""));
             } catch (Exception e) {
-                Matcher ma = Pattern.compile("\"title\"\\s*:\\s*\"([^\"]*)\"").matcher(s);
-                if (ma.find()) title = ma.group(1);
+                Matcher ma = Pattern.compile("\"(subject|title)\"\\s*:\\s*\"([^\"]*)\"").matcher(s);
+                if (ma.find()) subject = ma.group(2);
             }
-            title = title.trim().replaceAll("^[\"“”']+|[\"“”']+$", "");
-            if (title.isBlank()) throw new IOException("AI 未返回标题");
-            if (title.length() > 30) title = title.substring(0, 30);
-            result.put("title", title);
+            subject = subject.trim().replaceAll("^[\"“”']+|[\"“”']+$", "");
+            if (subject.isBlank()) throw new IOException("AI 未返回主题");
+            if (subject.length() > 30) subject = subject.substring(0, 30);
+            result.put("subject", subject);
             result.put("ok", true);
         } catch (Exception e) {
-            result.put("title", "");
+            result.put("subject", "");
             result.put("ok", false);
             result.put("error", "AI 起标题失败: " + e.getMessage());
         }
         return result;
     }
 
+    /**
+     * OCR 识别图片文字：调用本地视觉模型（qwen3-vl）识别图片中的文字。
+     * @param imgBytes 图片原始字节（自动缩放至最长边 ≤1600px 再送模型，控制请求体积）
+     * @return 识别出的文字（可能为空字符串）
+     */
+    public String ocrImage(byte[] imgBytes) throws Exception {
+        byte[] scaled = scaleToMax(imgBytes, 1600);
+        String b64 = Base64.getEncoder().encodeToString(scaled);
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("你是 OCR 引擎。请识别这张图片中的全部文字，并原样输出。\n");
+        prompt.append("要求：\n");
+        prompt.append("1. 只输出识别到的文字内容，保留原有段落和换行；\n");
+        prompt.append("2. 不要解释、不要翻译、不要添加任何额外说明；\n");
+        prompt.append("3. 图片中的图表、图形、公式不需要描述，只提取其中的文字；\n");
+        prompt.append("4. 如果图片中没有可识别的文字，只输出（无文字）三个字。");
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("model", visionModel);
+        body.put("prompt", prompt.toString());
+        body.put("stream", false);
+        body.put("images", List.of(b64));
+        Map<String, Object> options = new LinkedHashMap<>();
+        options.put("temperature", 0.1);
+        options.put("num_predict", 1024);
+        body.put("options", options);
+
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(ollamaBase + "/api/generate"))
+                .timeout(Duration.ofSeconds(300))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(body), StandardCharsets.UTF_8))
+                .build();
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200) throw new IOException("OCR 服务 HTTP " + resp.statusCode() + ": " + resp.body());
+        Map<String, Object> r = Json.asMap(Json.parse(resp.body()));
+        String out = Json.str(r, "response", "");
+        if (out == null) out = "";
+        out = out.trim();
+        // 兜底清理：模型偶尔输出引用块或多余说明
+        if (out.startsWith("```")) out = out.replaceAll("(?s)^```.*?\\n", "").replaceAll("(?s)\\n*```$", "").trim();
+        if (out.equals("（无文字）")) out = "";
+        return out;
+    }
+
+    /** 缩放图片至最长边 ≤ maxSide，降低 base64 体积；图片解码失败时原样返回 */
+    private static byte[] scaleToMax(byte[] imgBytes, int maxSide) {
+        try {
+            javax.imageio.ImageIO.setUseCache(false);
+            var img = javax.imageio.ImageIO.read(new ByteArrayInputStream(imgBytes));
+            if (img == null) return imgBytes;
+            int w = img.getWidth(), h = img.getHeight();
+            int m = Math.max(w, h);
+            if (m <= maxSide) return imgBytes;
+            double k = (double) maxSide / m;
+            int nw = Math.max(1, (int) (w * k)), nh = Math.max(1, (int) (h * k));
+            var out = new java.awt.image.BufferedImage(nw, nh, java.awt.image.BufferedImage.TYPE_INT_RGB);
+            var g = out.createGraphics();
+            g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(img, 0, 0, nw, nh, null);
+            g.dispose();
+            var bos = new ByteArrayOutputStream();
+            javax.imageio.ImageIO.write(out, "jpg", bos);
+            return bos.toByteArray();
+        } catch (Exception e) {
+            return imgBytes;
+        }
+    }
+
     /** 调用 OLLAMA /api/generate，强制 JSON 输出 */
     private String generate(String prompt) throws Exception {
         return generate(prompt, "json", 300);
-    }
-
-    /** 调用 OLLAMA /api/generate，纯文本输出（无 format 约束） */
-    private String generatePlain(String prompt, int maxTokens) throws Exception {
-        return generate(prompt, null, maxTokens);
     }
 
     private String generate(String prompt, String format, int maxTokens) throws Exception {
