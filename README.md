@@ -1,4 +1,43 @@
-# 🔥 牛逼笔记本 v1.4
+# 🔥 牛逼笔记本 (NB-Notebook) v1.4
+
+> Local-first smart notebook for students: snap an exam sheet, jot down scattered knowledge points, and let it organize everything into a structured, printable, searchable knowledge base — with AI auto-categorization and OCR running on your own machine.
+
+[English](#english) · [中文版](#中文版)
+
+## English
+
+**NB-Notebook** (牛逼笔记本) is a local-first note-taking system for students grinding through exam sheets. It turns scattered notes into a structured knowledge tree — ready to print, browse on your phone, or keep fully offline.
+
+### Highlights
+
+- **AI auto-categorization** — notes are classified into a growing knowledge tree by your local OLLAMA (`qwen3:8b`), based on subject + summary only (never the full text). Categories grow on demand, no duplicates.
+- **OCR with smart skipping** — OCR via local `qwen3-vl:30b`; red-boxed drawing regions are pre-whitened on the phone so image areas are never re-OCRed.
+- **Photo-sheet image extraction** — photograph an exam page, auto-extract embedded figures (contrast-based edge detection) and insert them into notes; manual box-select fallback when detection is imperfect.
+- **Print-ready** — select any notes and print. Video/audio auto-excluded with a hint; images keep their aspect ratio on A4.
+- **Phone companion (Android 6.0+)** — native 3-tab app over LAN: browse, capture with auto-sync to the desktop "pending" tray, red-frame crop, offline fallback via zip export.
+- **Zero-dependency backend** — pure JDK 17 (`com.sun.net.httpserver`), native HTML/CSS/JS frontend, no CDN, works offline.
+- **Your data is yours** — notes are plain HTML files under `data\notes\<id>\`; backing up is copying the folder.
+
+> The tool is Chinese-first by design (targets Chinese students); full Chinese docs below.
+
+### Quick start (desktop)
+
+```bat
+server\run.bat        # starts http://127.0.0.1:8080 (LAN IP shown in the console)
+```
+
+Then open http://127.0.0.1:8080 in a browser. AI features need OLLAMA running locally (`ollama serve` + `qwen3:8b`, plus `qwen3-vl:30b` for OCR).
+
+### Stack
+
+Java 17 zero-dependency server · native HTML/CSS/JS · Android (Gradle + AGP 8.1.4, OpenCV 4.9) · OLLAMA (qwen3:8b / qwen3-vl:30b)
+
+### License
+
+MIT ([LICENSE](LICENSE)) © 2026 类人群星闪耀时 @豆包 · 北中小作坊
+
+---
+## 中文版
 
 把刷卷子时零散记下的知识点，自动整理成结构化的知识库，随时打印、随时手机查看。
 
